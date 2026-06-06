@@ -384,8 +384,10 @@ def run_pipeline(job_id: str):
 
 
 if __name__ == "__main__":
+    import os
+    port = int(os.environ.get("PORT", "8080"))
     print("=" * 50)
     print("  🎬 Douyin Video Translator - Web UI")
-    print("  Open: http://localhost:8080")
+    print(f"  Open: http://localhost:{port}")
     print("=" * 50)
-    uvicorn.run(app, host="0.0.0.0", port=8080)
+    uvicorn.run(app, host="0.0.0.0", port=port)
