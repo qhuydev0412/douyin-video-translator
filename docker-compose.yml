@@ -1,0 +1,57 @@
+version: "3.8"
+
+# Deploy:
+#   docker compose up -d
+#   Open: http://your-server:8080
+#
+# With GPU:
+#   docker compose --profile gpu up -d
+
+services:
+  web:
+    build: .
+    ports:
+      - "8080:8080"
+    volumes:
+      - storage:/app/storage
+      - whisper_cache:/root/.cache/whisper
+      - torch_cache:/root/.cache/torch/hub
+      # Uncomment for Google Cloud credentials:
+      # - ./credentials:/app/credentials:ro
+    environment:
+      - GOOGLE_APPLICATION_CREDENTIALS=/app/credentials/gcloud.json
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 8G
+        reservations:
+          memory: 4G
+
+  # GPU variant — activate with: docker compose --profile gpu up -d
+  web-gpu:
+    build: .
+    ports:
+      - "8080:8080"
+    volumes:
+      - storage:/app/storage
+      - whisper_cache:/root/.cache/whisper
+      - torch_cache:/root/.cache/torch/hub
+    environment:
+      - GOOGLE_APPLICATION_CREDENTIALS=/app/credentials/gcloud.json
+      - NVIDIA_VISIBLE_DEVICES=all
+    restart: unless-stopped
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    profiles:
+      - gpu
+
+volumes:
+  storage:
+  whisper_cache:
+  torch_cache:
