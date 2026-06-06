@@ -1,0 +1,31 @@
+# Core
+fastapi>=0.104.0
+uvicorn[standard]>=0.24.0
+python-multipart>=0.0.6
+pydantic>=2.5.0
+pydantic-settings>=2.1.0
+httpx>=0.25.0
+
+# Translation
+deep-translator>=1.11.0
+
+# TTS
+edge-tts>=6.1.0
+
+# Video download
+yt-dlp>=2024.1.0
+
+# Audio processing (install torch CPU first to avoid huge CUDA download)
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch
+torchaudio
+
+# Speech recognition
+openai-whisper>=20231117
+
+# Vocal isolation
+demucs>=4.0.0
+
+# Task queue (optional, for full API mode)
+celery[redis]>=5.3.0
+redis>=5.0.0

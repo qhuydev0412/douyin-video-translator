@@ -31,7 +31,6 @@ tests/
 .kiro/
 
 # Docker
-Dockerfile*
 docker-compose*.yml
 .dockerignore
 

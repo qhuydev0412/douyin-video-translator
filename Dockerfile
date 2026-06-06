@@ -4,23 +4,44 @@ FROM python:3.11-slim
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
     git \
+    build-essential \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
-# Copy all source first (needed for pip install)
-COPY pyproject.toml .
+# Upgrade pip and install build tools
+RUN pip install --no-cache-dir --upgrade pip setuptools wheel
+
+# Install PyTorch CPU (separate step — large download, good to cache)
+RUN pip install --no-cache-dir \
+    torch torchaudio \
+    --index-url https://download.pytorch.org/whl/cpu
+
+# Install whisper and demucs (depends on torch)
+RUN pip install --no-cache-dir openai-whisper demucs
+
+# Install remaining dependencies
+RUN pip install --no-cache-dir \
+    fastapi \
+    "uvicorn[standard]" \
+    python-multipart \
+    pydantic \
+    pydantic-settings \
+    httpx \
+    deep-translator \
+    edge-tts \
+    yt-dlp \
+    "celery[redis]" \
+    redis
+
+# Copy application code
 COPY app/ ./app/
 COPY web_ui.py .
 
-# Install Python dependencies
-RUN pip install --no-cache-dir . && \
-    pip install --no-cache-dir python-multipart deep-translator
-
 # Create directories
-RUN mkdir -p storage/jobs /root/.cache/whisper /root/.cache/torch/hub
+RUN mkdir -p storage/jobs
 
-# Pre-download Whisper base model (~150MB)
+# Pre-download Whisper base model
 RUN python -c "import whisper; whisper.load_model('base')"
 
 VOLUME /app/storage
