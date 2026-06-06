@@ -18,7 +18,8 @@ RUN pip install --no-cache-dir \
     --index-url https://download.pytorch.org/whl/cpu
 
 # Install whisper and demucs (depends on torch)
-RUN pip install --no-cache-dir openai-whisper demucs torchcodec
+RUN pip install --no-cache-dir openai-whisper "demucs==4.0.1" && \
+    pip uninstall -y torchcodec 2>/dev/null || true
 
 # Install remaining dependencies
 RUN pip install --no-cache-dir \
