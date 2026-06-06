@@ -8,6 +8,7 @@ Mở browser: http://localhost:8080
 
 import asyncio
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -15,6 +16,10 @@ import time
 import uuid
 from pathlib import Path
 from threading import Thread
+
+# Load .env file
+from dotenv import load_dotenv
+load_dotenv()
 
 sys.path.insert(0, str(Path(__file__).parent))
 
@@ -27,6 +32,42 @@ app = FastAPI(title="Douyin Video Translator - Web UI")
 
 # Store job statuses in memory
 jobs: dict[str, dict] = {}
+
+# Pre-loaded models (loaded at startup)
+_whisper_model = None
+_demucs_loaded = False
+
+
+@app.on_event("startup")
+async def preload_models():
+    """Pre-load Whisper and Demucs models at startup so first request is fast."""
+    global _whisper_model, _demucs_loaded
+    import logging
+    logger = logging.getLogger("startup")
+
+    # Load Whisper model
+    whisper_model_name = os.environ.get("WHISPER_MODEL", "large-v3")
+    logger.info(f"Loading Whisper model '{whisper_model_name}'...")
+    print(f"⏳ Loading Whisper model '{whisper_model_name}'... (first time downloads ~3GB)")
+    try:
+        import whisper
+        _whisper_model = whisper.load_model(whisper_model_name)
+        print(f"✅ Whisper model '{whisper_model_name}' loaded")
+    except Exception as e:
+        print(f"⚠️  Whisper model load failed (will retry on first request): {e}")
+
+    # Pre-load Demucs model
+    print("⏳ Loading Demucs model...")
+    try:
+        from demucs.pretrained import get_model
+        get_model("htdemucs")
+        _demucs_loaded = True
+        print("✅ Demucs model loaded")
+    except Exception as e:
+        print(f"⚠️  Demucs model load failed (will use fallback): {e}")
+
+    print("🚀 All models loaded. Ready to process videos!")
+
 
 STORAGE = Path("storage/jobs")
 STORAGE.mkdir(parents=True, exist_ok=True)
@@ -338,6 +379,9 @@ def run_pipeline(job_id: str):
         update(f"Nhận dạng giọng nói (Whisper {whisper_model})...", 40)
         log(f"🗣️ Recognizing speech with Whisper {whisper_model}...")
         recognizer = SpeechRecognizer(model_name=whisper_model)
+        # Use pre-loaded model if available
+        if _whisper_model is not None:
+            recognizer._model = _whisper_model
         transcription = recognizer.recognize(isolation.vocals_path)
         update("Nhận dạng giọng nói", 55)
         log(f"✅ Recognized {len(transcription.segments)} segments", "success")
@@ -361,7 +405,7 @@ def run_pipeline(job_id: str):
 
         # Step 6: Compose video (100%)
         update("Ghép video...", 90)
-        log("🎬 Composing final video...")
+        log("🎬 Composing final video with subtitles...")
         composer = VideoComposer()
         output_dir = work_dir / "output"
         output_path = composer.compose(
@@ -370,6 +414,7 @@ def run_pipeline(job_id: str):
             background_audio=isolation.background_path,
             output_dir=output_dir,
             background_volume=bg_volume,
+            translation=translation,
         )
         update("Hoàn tất! 🎉", 100)
         log(f"✅ Output: {output_path}", "success")

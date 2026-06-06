@@ -110,36 +110,25 @@ class SpeechRecognizer:
     ) -> list[TranscriptionSegment]:
         """Build TranscriptionSegment list from Whisper output.
 
-        Assigns speaker labels based on basic speaker change detection
-        using pause gaps between segments.
+        Assigns all segments to speaker_1 initially.
+        Speaker diarization will be handled by GPT in the translation step
+        for more accurate results based on content analysis.
 
         Args:
             segments_data: Raw segments from Whisper transcribe result.
 
         Returns:
-            List of TranscriptionSegment with timestamps and speaker labels.
+            List of TranscriptionSegment with timestamps.
         """
         segments: list[TranscriptionSegment] = []
-        current_speaker = "speaker_1"
-        speaker_count = 1
 
-        for i, seg in enumerate(segments_data):
-            # Basic speaker change detection: if there's a significant gap
-            # (> 2 seconds) between segments, assume a new speaker
-            if i > 0:
-                prev_end = segments_data[i - 1]["end"]
-                current_start = seg["start"]
-                gap = current_start - prev_end
-                if gap > 2.0:
-                    speaker_count += 1
-                    current_speaker = f"speaker_{speaker_count}"
-
+        for seg in segments_data:
             segments.append(
                 TranscriptionSegment(
                     start=float(seg["start"]),
                     end=float(seg["end"]),
                     text=seg["text"].strip(),
-                    speaker=current_speaker,
+                    speaker="speaker_1",  # Default; GPT will reassign if multi-speaker
                 )
             )
 

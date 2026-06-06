@@ -6,10 +6,9 @@ pydantic>=2.5.0
 pydantic-settings>=2.1.0
 httpx>=0.25.0
 
-# Translation
+# Translation & TTS
 deep-translator>=1.11.0
-
-# TTS
+openai>=1.0.0
 edge-tts>=6.1.0
 
 # Video download

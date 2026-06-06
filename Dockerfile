@@ -41,8 +41,11 @@ COPY web_ui.py .
 # Create directories
 RUN mkdir -p storage/jobs
 
-# Whisper model will be downloaded on first use
-# To pre-download, uncomment: RUN python -c "import whisper; whisper.load_model('base')"
+# Pre-download Whisper base model into image (cached in Docker layer)
+RUN python -c "import whisper; whisper.load_model('base')"
+
+# Pre-download Demucs model into image
+RUN python -c "from demucs.pretrained import get_model; get_model('htdemucs')"
 
 VOLUME /app/storage
 EXPOSE 8080

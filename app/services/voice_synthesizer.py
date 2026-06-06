@@ -1,26 +1,25 @@
-"""Voice synthesis service using edge-tts for Vietnamese TTS generation."""
+"""Voice synthesis service using OpenAI TTS for natural Vietnamese voices."""
 
-import asyncio
 import json
 import logging
+import os
 import subprocess
 from pathlib import Path
 
-import edge_tts
+from openai import OpenAI
 
 from app.models.pipeline import SegmentAudio, SynthesisResult, TranslationResult
 
 logger = logging.getLogger(__name__)
 
-# Available Vietnamese voices in edge-tts
-VIETNAMESE_VOICES = [
-    "vi-VN-HoaiMyNeural",   # Female
-    "vi-VN-NamMinhNeural",  # Male
-]
+# OpenAI TTS voices — assign by gender/tone
+# alloy: neutral, echo: male deep, fable: expressive, onyx: male authoritative
+# nova: female warm, shimmer: female soft
+MALE_VOICES = ["echo", "onyx", "alloy"]
+FEMALE_VOICES = ["nova", "shimmer", "fable"]
+DEFAULT_VOICE = "nova"
 
-DEFAULT_VOICE = "vi-VN-HoaiMyNeural"
-
-# Maximum speed multiplier allowed
+# Maximum speed multiplier
 MAX_SPEED_MULTIPLIER = 2.0
 
 
@@ -29,49 +28,63 @@ class VoiceSynthesizerError(Exception):
 
 
 class VoiceSynthesizer:
-    """Generates Vietnamese TTS audio using edge-tts.
+    """Generates Vietnamese TTS audio using OpenAI TTS API.
 
-    Synthesizes translated text segments into Vietnamese speech audio files,
-    handles multi-speaker voice assignment, speed adjustment for timing sync,
-    and combines segments into a final audio file.
+    Provides higher quality, more natural voices compared to edge-tts.
+    Supports distinct male/female voices for multi-speaker content.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, model: str = "tts-1") -> None:
+        """Initialize voice synthesizer.
+
+        Args:
+            model: OpenAI TTS model. "tts-1" (fast) or "tts-1-hd" (higher quality).
+        """
+        self._model = model
+        self._client: OpenAI | None = None
         self._speaker_voice_map: dict[str, str] = {}
-        self._voice_index: int = 0
+        self._male_index: int = 0
+        self._female_index: int = 0
+        self._speaker_count: int = 0
+
+    @property
+    def client(self) -> OpenAI:
+        """Lazy-initialize OpenAI client."""
+        if self._client is None:
+            self._client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
+        return self._client
 
     async def synthesize(
         self, translation: TranslationResult, output_dir: Path
     ) -> SynthesisResult:
-        """Generate Vietnamese TTS audio for each segment using edge-tts.
+        """Generate Vietnamese TTS audio for each segment.
 
         Args:
-            translation: Translation result containing segments to synthesize.
-            output_dir: Directory where audio files will be saved.
+            translation: Translation result with Vietnamese text segments.
+            output_dir: Directory to save audio files.
 
         Returns:
-            SynthesisResult with combined audio path and individual segment audios.
-
-        Raises:
-            VoiceSynthesizerError: If synthesis fails completely.
+            SynthesisResult with combined audio and segment audios.
         """
         output_dir.mkdir(parents=True, exist_ok=True)
 
-        # Reset speaker-voice mapping for each synthesis call
         self._speaker_voice_map = {}
-        self._voice_index = 0
+        self._speaker_count = 0
+        self._male_index = 0
+        self._female_index = 0
 
         segment_audios: list[SegmentAudio] = []
 
         for i, segment in enumerate(translation.segments):
-            if not segment.translated_text.strip():
-                logger.warning("Segment %d has empty translated text, skipping", i)
+            text = segment.translated_text.strip()
+            if not text:
+                logger.warning("Segment %d empty, skipping", i)
                 continue
 
-            # Clean text for TTS (remove special chars that cause "No audio received")
-            clean_text = self._clean_text_for_tts(segment.translated_text)
+            # Clean text
+            clean_text = self._clean_text_for_tts(text)
             if not clean_text:
-                logger.warning("Segment %d has no speakable text after cleaning, skipping", i)
+                logger.warning("Segment %d no speakable text, skipping", i)
                 continue
 
             target_duration = segment.end - segment.start
@@ -79,7 +92,7 @@ class VoiceSynthesizer:
 
             try:
                 voice = self.select_voice(segment.speaker)
-                segment_audio = await self._synthesize_segment(
+                segment_audio = self._synthesize_segment(
                     text=clean_text,
                     voice=voice,
                     target_duration=target_duration,
@@ -89,74 +102,23 @@ class VoiceSynthesizer:
                 )
                 segment_audios.append(segment_audio)
             except Exception as e:
-                logger.warning(
-                    "Failed to synthesize segment %d with voice %s: %s. "
-                    "Trying default voice.",
-                    i,
-                    self._speaker_voice_map.get(segment.speaker, "unknown"),
-                    str(e),
-                )
-                # Graceful degradation: try default voice
-                try:
-                    segment_audio = await self._synthesize_segment(
-                        text=clean_text,
-                        voice=DEFAULT_VOICE,
-                        target_duration=target_duration,
-                        output_path=segment_path,
-                        start=segment.start,
-                        end=segment.end,
-                    )
-                    segment_audios.append(segment_audio)
-                except Exception as fallback_err:
-                    # Skip this segment instead of crashing
-                    logger.warning(
-                        "Skipping segment %d — TTS failed for both voices: %s",
-                        i,
-                        str(fallback_err),
-                    )
+                logger.warning("Skipping segment %d — TTS failed: %s", i, str(e))
 
         if not segment_audios:
-            raise VoiceSynthesizerError("No segments were synthesized successfully")
+            raise VoiceSynthesizerError("No segments were synthesized")
 
-        # Combine segment audios into final audio file with correct timing
+        # Combine segments into final audio
         combined_path = output_dir / "vietnamese_audio.wav"
         self._combine_segments(segment_audios, combined_path)
 
-        logger.info(
-            "Voice synthesis completed: %d segments synthesized", len(segment_audios)
-        )
+        logger.info("Voice synthesis completed: %d segments", len(segment_audios))
         return SynthesisResult(audio_path=combined_path, segment_audios=segment_audios)
 
-    @staticmethod
-    def _clean_text_for_tts(text: str) -> str:
-        """Clean text to avoid edge-tts 'No audio received' errors.
-
-        Removes characters that TTS cannot pronounce (emojis, special symbols,
-        lone punctuation). Returns empty string if nothing speakable remains.
-        """
-        import re
-        # Remove emojis and special Unicode symbols
-        cleaned = re.sub(r'[\U00010000-\U0010ffff]', '', text)
-        # Remove standalone special characters that TTS can't read
-        cleaned = re.sub(r'[#@*~`|\\<>{}[\]^]', '', cleaned)
-        # Collapse multiple spaces/newlines
-        cleaned = re.sub(r'\s+', ' ', cleaned).strip()
-        # If only punctuation remains, return empty
-        if cleaned and not re.search(r'[\w\u00C0-\u024F\u1E00-\u1EFF\u4e00-\u9fff]', cleaned):
-            return ""
-        return cleaned
-
     def select_voice(self, speaker: str | None) -> str:
-        """Select appropriate Vietnamese voice for speaker.
+        """Assign voice based on speaker label.
 
-        Assigns distinct voices to distinct speakers. If speaker is None,
-        returns the default voice.
-
-        Args:
-            speaker: Speaker label or None for default.
-
-        Returns:
-            Vietnamese voice ID string for edge-tts.
+        Uses a single consistent voice for the primary speaker.
+        Only assigns different voice if there are clearly multiple speakers.
         """
         if speaker is None:
             return DEFAULT_VOICE
@@ -164,14 +126,22 @@ class VoiceSynthesizer:
         if speaker in self._speaker_voice_map:
             return self._speaker_voice_map[speaker]
 
-        # Assign next available voice (cycling through available voices)
-        voice = VIETNAMESE_VOICES[self._voice_index % len(VIETNAMESE_VOICES)]
-        self._speaker_voice_map[speaker] = voice
-        self._voice_index += 1
+        # First speaker always gets default female voice (most natural for narration)
+        if self._speaker_count == 0:
+            voice = "nova"  # Female, warm — good for narration
+        elif self._speaker_count == 1:
+            voice = "onyx"  # Male, deep — contrasting voice
+        elif self._speaker_count == 2:
+            voice = "shimmer"  # Female, soft
+        else:
+            voice = MALE_VOICES[self._male_index % len(MALE_VOICES)]
+            self._male_index += 1
 
+        self._speaker_count += 1
+        self._speaker_voice_map[speaker] = voice
         return voice
 
-    async def _synthesize_segment(
+    def _synthesize_segment(
         self,
         text: str,
         voice: str,
@@ -180,52 +150,42 @@ class VoiceSynthesizer:
         start: float,
         end: float,
     ) -> SegmentAudio:
-        """Synthesize a single segment with optional speed adjustment.
+        """Synthesize a single segment with OpenAI TTS."""
+        # Calculate speed based on target duration
+        # OpenAI TTS speed range: 0.25 to 4.0
+        speed = 1.0
 
-        First generates audio at normal speed, then checks duration.
-        If TTS duration exceeds target, adjusts speed up to MAX_SPEED_MULTIPLIER.
+        # Generate TTS
+        response = self.client.audio.speech.create(
+            model=self._model,
+            voice=voice,
+            input=text,
+            response_format="mp3",
+            speed=speed,
+        )
 
-        Args:
-            text: Vietnamese text to synthesize.
-            voice: edge-tts voice ID.
-            target_duration: Target duration in seconds.
-            output_path: Path to save the audio file.
-            start: Segment start time in seconds.
-            end: Segment end time in seconds.
+        # Save audio file
+        response.stream_to_file(str(output_path))
 
-        Returns:
-            SegmentAudio with actual duration and speed adjustment info.
-        """
-        # Generate initial TTS audio at normal speed
-        communicate = edge_tts.Communicate(text, voice)
-        await communicate.save(str(output_path))
-
-        # Get actual duration of generated audio
+        # Get actual duration
         actual_duration = self._get_audio_duration(output_path)
         speed_adjusted = False
 
-        # If TTS duration exceeds target, adjust speed
-        if actual_duration > target_duration and target_duration > 0:
-            speed_multiplier = actual_duration / target_duration
+        # If audio is too long, regenerate with higher speed
+        if actual_duration > target_duration and target_duration > 0.5:
+            desired_speed = actual_duration / target_duration
+            speed = min(desired_speed, MAX_SPEED_MULTIPLIER)
 
-            if speed_multiplier <= MAX_SPEED_MULTIPLIER:
-                # Adjust speed using edge-tts rate parameter
-                rate_percent = int((speed_multiplier - 1.0) * 100)
-                rate_str = f"+{rate_percent}%"
-
-                communicate = edge_tts.Communicate(text, voice, rate=rate_str)
-                await communicate.save(str(output_path))
-
-                actual_duration = self._get_audio_duration(output_path)
-                speed_adjusted = True
-            else:
-                # Speed exceeds max, apply maximum speed adjustment
-                rate_str = "+100%"
-                communicate = edge_tts.Communicate(text, voice, rate=rate_str)
-                await communicate.save(str(output_path))
-
-                actual_duration = self._get_audio_duration(output_path)
-                speed_adjusted = True
+            response = self.client.audio.speech.create(
+                model=self._model,
+                voice=voice,
+                input=text,
+                response_format="mp3",
+                speed=speed,
+            )
+            response.stream_to_file(str(output_path))
+            actual_duration = self._get_audio_duration(output_path)
+            speed_adjusted = True
 
         return SegmentAudio(
             path=output_path,
@@ -237,136 +197,66 @@ class VoiceSynthesizer:
         )
 
     def _get_audio_duration(self, audio_path: Path) -> float:
-        """Get duration of an audio file using FFprobe.
-
-        Args:
-            audio_path: Path to the audio file.
-
-        Returns:
-            Duration in seconds.
-
-        Raises:
-            VoiceSynthesizerError: If FFprobe fails.
-        """
+        """Get audio duration using ffprobe."""
         cmd = [
-            "ffprobe",
-            "-v", "quiet",
-            "-print_format", "json",
-            "-show_format",
-            str(audio_path),
+            "ffprobe", "-v", "quiet", "-print_format", "json",
+            "-show_format", str(audio_path),
         ]
-
         try:
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=30,
-            )
-        except FileNotFoundError:
-            raise VoiceSynthesizerError(
-                "ffprobe not found. Please install FFmpeg."
-            )
-        except subprocess.TimeoutExpired:
-            raise VoiceSynthesizerError(
-                "ffprobe timed out while analyzing audio file."
-            )
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+            if result.returncode != 0:
+                return 0.0
+            data = json.loads(result.stdout)
+            return float(data["format"]["duration"])
+        except Exception:
+            return 0.0
 
-        if result.returncode != 0:
-            raise VoiceSynthesizerError(
-                f"ffprobe failed: {result.stderr.strip()}"
-            )
-
-        try:
-            probe_data = json.loads(result.stdout)
-            duration = float(probe_data["format"]["duration"])
-        except (json.JSONDecodeError, KeyError, ValueError) as e:
-            raise VoiceSynthesizerError(
-                f"Failed to parse ffprobe output: {e}"
-            )
-
-        return duration
-
-    def _combine_segments(
-        self, segment_audios: list[SegmentAudio], output_path: Path
-    ) -> None:
-        """Combine individual segment audios into a final audio file with correct timing.
-
-        Uses FFmpeg to create a combined audio file where each segment is placed
-        at its correct start time, with silence filling gaps between segments.
-
-        Args:
-            segment_audios: List of synthesized segment audio files with timing info.
-            output_path: Path for the combined output WAV file.
-
-        Raises:
-            VoiceSynthesizerError: If FFmpeg combination fails.
-        """
+    def _combine_segments(self, segment_audios: list[SegmentAudio], output_path: Path) -> None:
+        """Combine segment audios with correct timing using FFmpeg."""
         if not segment_audios:
             raise VoiceSynthesizerError("No segments to combine")
 
-        # Determine total duration from the last segment's end time
-        total_duration = max(seg.end for seg in segment_audios)
-
-        # Build FFmpeg filter complex to place each segment at correct time
         inputs = []
         filter_parts = []
 
         for i, seg in enumerate(segment_audios):
             inputs.extend(["-i", str(seg.path)])
-            # Delay each segment by its start time (in milliseconds)
             delay_ms = int(seg.start * 1000)
-            filter_parts.append(
-                f"[{i}:a]adelay={delay_ms}|{delay_ms}[delayed{i}]"
-            )
+            filter_parts.append(f"[{i}:a]adelay={delay_ms}|{delay_ms}[delayed{i}]")
 
-        # Mix all delayed segments together
         mix_inputs = "".join(f"[delayed{i}]" for i in range(len(segment_audios)))
         filter_parts.append(
             f"{mix_inputs}amix=inputs={len(segment_audios)}:duration=longest:dropout_transition=0[mixed]"
         )
-
-        # Normalize volume after mixing (amix reduces volume by number of inputs)
-        filter_parts.append(
-            f"[mixed]volume={len(segment_audios)}[out]"
-        )
+        filter_parts.append(f"[mixed]volume={len(segment_audios)}[out]")
 
         filter_complex = ";".join(filter_parts)
 
         cmd = [
-            "ffmpeg",
-            "-y",
-            *inputs,
+            "ffmpeg", "-y", *inputs,
             "-filter_complex", filter_complex,
             "-map", "[out]",
-            "-acodec", "pcm_s16le",
-            "-ar", "44100",
-            "-ac", "2",
+            "-acodec", "pcm_s16le", "-ar", "44100", "-ac", "2",
             str(output_path),
         ]
 
         try:
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=300,
-            )
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+            if result.returncode != 0:
+                raise VoiceSynthesizerError(f"FFmpeg failed: {result.stderr[:200]}")
         except FileNotFoundError:
-            raise VoiceSynthesizerError(
-                "ffmpeg not found. Please install FFmpeg."
-            )
-        except subprocess.TimeoutExpired:
-            raise VoiceSynthesizerError(
-                "ffmpeg timed out while combining audio segments."
-            )
-
-        if result.returncode != 0:
-            raise VoiceSynthesizerError(
-                f"ffmpeg combination failed: {result.stderr.strip()}"
-            )
+            raise VoiceSynthesizerError("ffmpeg not found")
 
         if not output_path.exists():
-            raise VoiceSynthesizerError(
-                "Audio combination completed but output file was not created."
-            )
+            raise VoiceSynthesizerError("Combined audio not created")
+
+    @staticmethod
+    def _clean_text_for_tts(text: str) -> str:
+        """Clean text for TTS — remove unspeakable characters."""
+        import re
+        cleaned = re.sub(r'[\U00010000-\U0010ffff]', '', text)
+        cleaned = re.sub(r'[#@*~`|\\<>{}[\]^]', '', cleaned)
+        cleaned = re.sub(r'\s+', ' ', cleaned).strip()
+        if cleaned and not re.search(r'[\w\u00C0-\u024F\u1E00-\u1EFF\u4e00-\u9fff]', cleaned):
+            return ""
+        return cleaned

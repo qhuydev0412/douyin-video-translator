@@ -17,6 +17,7 @@ dependencies = [
     "demucs>=4.0.0",
     "edge-tts>=6.1.0",
     "deep-translator>=1.11.0",
+    "openai>=1.0.0",
     "pydantic>=2.5.0",
     "pydantic-settings>=2.1.0",
     "httpx>=0.25.0",
