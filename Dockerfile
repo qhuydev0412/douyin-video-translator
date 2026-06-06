@@ -25,10 +25,12 @@ RUN pip install --no-cache-dir \
     fastapi \
     "uvicorn[standard]" \
     python-multipart \
+    python-dotenv \
     pydantic \
     pydantic-settings \
     httpx \
     deep-translator \
+    openai \
     edge-tts \
     yt-dlp \
     "celery[redis]" \
