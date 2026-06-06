@@ -1,29 +1,23 @@
 FROM python:3.11-slim
 
-# System dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    ffmpeg \
-    git \
-    build-essential \
+    ffmpeg git build-essential libsndfile1 \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
-# Upgrade pip and install build tools
 RUN pip install --no-cache-dir --upgrade pip setuptools wheel
 
-# Install PyTorch CPU (pin versions to avoid torchcodec issues)
+# Pin PyTorch CPU + torchaudio FIRST (prevents torchcodec being pulled)
 RUN pip install --no-cache-dir \
     "torch==2.5.1" "torchaudio==2.5.1" \
     --index-url https://download.pytorch.org/whl/cpu
 
-# Install whisper and demucs (pin torchaudio to avoid torchcodec dependency)
-RUN pip install --no-cache-dir openai-whisper
-RUN pip install --no-cache-dir --no-deps "demucs==4.0.1"
-RUN pip install --no-cache-dir julius einops dora-search lameenc openunmix pyyaml tqdm numpy
-
-# Install remaining dependencies
+# Now install everything else in one shot (torchaudio already pinned above)
 RUN pip install --no-cache-dir \
+    openai-whisper \
+    "demucs==4.0.1" \
+    soundfile \
     fastapi \
     "uvicorn[standard]" \
     python-multipart \
@@ -38,17 +32,13 @@ RUN pip install --no-cache-dir \
     "celery[redis]" \
     redis
 
-# Copy application code
 COPY app/ ./app/
 COPY web_ui.py .
 
-# Create directories
 RUN mkdir -p storage/jobs
 
-# Pre-download Whisper base model into image (cached in Docker layer)
+# Pre-download models
 RUN python -c "import whisper; whisper.load_model('base')"
-
-# Pre-download Demucs model into image
 RUN python -c "from demucs.pretrained import get_model; get_model('htdemucs')"
 
 VOLUME /app/storage
