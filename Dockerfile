@@ -12,14 +12,15 @@ WORKDIR /app
 # Upgrade pip and install build tools
 RUN pip install --no-cache-dir --upgrade pip setuptools wheel
 
-# Install PyTorch CPU (separate step — large download, good to cache)
+# Install PyTorch CPU (pin versions to avoid torchcodec issues)
 RUN pip install --no-cache-dir \
-    torch torchaudio \
+    "torch==2.5.1" "torchaudio==2.5.1" \
     --index-url https://download.pytorch.org/whl/cpu
 
-# Install whisper and demucs (depends on torch)
-RUN pip install --no-cache-dir openai-whisper "demucs==4.0.1" && \
-    pip uninstall -y torchcodec 2>/dev/null || true
+# Install whisper and demucs (pin torchaudio to avoid torchcodec dependency)
+RUN pip install --no-cache-dir openai-whisper
+RUN pip install --no-cache-dir --no-deps "demucs==4.0.1"
+RUN pip install --no-cache-dir julius einops dora-search lameenc openunmix pyyaml tqdm numpy
 
 # Install remaining dependencies
 RUN pip install --no-cache-dir \
