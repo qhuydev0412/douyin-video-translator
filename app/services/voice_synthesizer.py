@@ -59,12 +59,7 @@ class VoiceSynthesizer:
     ) -> SynthesisResult:
         """Generate Vietnamese TTS audio for each segment.
 
-        Args:
-            translation: Translation result with Vietnamese text segments.
-            output_dir: Directory to save audio files.
-
-        Returns:
-            SynthesisResult with combined audio and segment audios.
+        Synthesizes all segments in parallel for speed.
         """
         output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -73,39 +68,56 @@ class VoiceSynthesizer:
         self._male_index = 0
         self._female_index = 0
 
-        segment_audios: list[SegmentAudio] = []
+        # Prepare tasks for parallel execution
+        import concurrent.futures
 
+        tasks = []
         for i, segment in enumerate(translation.segments):
             text = segment.translated_text.strip()
             if not text:
-                logger.warning("Segment %d empty, skipping", i)
                 continue
-
-            # Clean text
             clean_text = self._clean_text_for_tts(text)
             if not clean_text:
-                logger.warning("Segment %d no speakable text, skipping", i)
                 continue
 
             target_duration = segment.end - segment.start
             segment_path = output_dir / f"segment_{i:04d}.mp3"
+            voice = self.select_voice(segment.speaker)
 
-            try:
-                voice = self.select_voice(segment.speaker)
-                segment_audio = self._synthesize_segment(
-                    text=clean_text,
-                    voice=voice,
-                    target_duration=target_duration,
-                    output_path=segment_path,
-                    start=segment.start,
-                    end=segment.end,
-                )
-                segment_audios.append(segment_audio)
-            except Exception as e:
-                logger.warning("Skipping segment %d — TTS failed: %s", i, str(e))
+            tasks.append({
+                "index": i,
+                "text": clean_text,
+                "voice": voice,
+                "target_duration": target_duration,
+                "output_path": segment_path,
+                "start": segment.start,
+                "end": segment.end,
+            })
+
+        if not tasks:
+            raise VoiceSynthesizerError("No segments to synthesize")
+
+        # Execute TTS calls in parallel (max 5 concurrent)
+        segment_audios: list[SegmentAudio] = []
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+            futures = {
+                executor.submit(self._synthesize_segment_sync, t): t
+                for t in tasks
+            }
+            for future in concurrent.futures.as_completed(futures):
+                task_info = futures[future]
+                try:
+                    result = future.result()
+                    segment_audios.append(result)
+                except Exception as e:
+                    logger.warning("Skipping segment %d — TTS failed: %s", task_info["index"], str(e))
 
         if not segment_audios:
             raise VoiceSynthesizerError("No segments were synthesized")
+
+        # Sort by start time
+        segment_audios.sort(key=lambda s: s.start)
 
         # Combine segments into final audio
         combined_path = output_dir / "vietnamese_audio.wav"
@@ -113,6 +125,17 @@ class VoiceSynthesizer:
 
         logger.info("Voice synthesis completed: %d segments", len(segment_audios))
         return SynthesisResult(audio_path=combined_path, segment_audios=segment_audios)
+
+    def _synthesize_segment_sync(self, task: dict) -> SegmentAudio:
+        """Synchronous wrapper for parallel TTS execution."""
+        return self._synthesize_segment(
+            text=task["text"],
+            voice=task["voice"],
+            target_duration=task["target_duration"],
+            output_path=task["output_path"],
+            start=task["start"],
+            end=task["end"],
+        )
 
     def select_voice(self, speaker: str | None) -> str:
         """Assign voice based on speaker label.
@@ -151,11 +174,16 @@ class VoiceSynthesizer:
         end: float,
     ) -> SegmentAudio:
         """Synthesize a single segment with OpenAI TTS."""
-        # Calculate speed based on target duration
-        # OpenAI TTS speed range: 0.25 to 4.0
+        # Estimate speed based on text length vs target duration
+        # Vietnamese ~3-4 syllables/sec at normal speed
         speed = 1.0
+        if target_duration > 0.5 and len(text) > 20:
+            # If text is long relative to duration, speed up slightly
+            estimated_duration = len(text) * 0.15  # rough: 0.15s per char
+            if estimated_duration > target_duration:
+                speed = min(estimated_duration / target_duration, 2.0)
 
-        # Generate TTS
+        # Generate TTS (single API call)
         response = self.client.audio.speech.create(
             model=self._model,
             voice=voice,
@@ -163,29 +191,10 @@ class VoiceSynthesizer:
             response_format="mp3",
             speed=speed,
         )
-
-        # Save audio file
         response.stream_to_file(str(output_path))
 
-        # Get actual duration
+        # Get duration (fast, local ffprobe)
         actual_duration = self._get_audio_duration(output_path)
-        speed_adjusted = False
-
-        # If audio is too long, regenerate with higher speed
-        if actual_duration > target_duration and target_duration > 0.5:
-            desired_speed = actual_duration / target_duration
-            speed = min(desired_speed, MAX_SPEED_MULTIPLIER)
-
-            response = self.client.audio.speech.create(
-                model=self._model,
-                voice=voice,
-                input=text,
-                response_format="mp3",
-                speed=speed,
-            )
-            response.stream_to_file(str(output_path))
-            actual_duration = self._get_audio_duration(output_path)
-            speed_adjusted = True
 
         return SegmentAudio(
             path=output_path,
@@ -193,7 +202,7 @@ class VoiceSynthesizer:
             end=end,
             duration=actual_duration,
             target_duration=target_duration,
-            speed_adjusted=speed_adjusted,
+            speed_adjusted=speed != 1.0,
         )
 
     def _get_audio_duration(self, audio_path: Path) -> float:

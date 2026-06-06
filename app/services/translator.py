@@ -38,13 +38,14 @@ class Translator:
 
     GPT-4o provides contextual, natural translation — much better than
     Google Translate for idioms, slang, and conversational Chinese.
+    Uses 2-pass approach: first understand context, then translate.
     """
 
     def __init__(
         self,
         max_retries: int | None = None,
         backoff_base: int | None = None,
-        model: str = "gpt-4o-mini",
+        model: str = "gpt-4o",
     ):
         self.max_retries = max_retries if max_retries is not None else settings.MAX_RETRY_ATTEMPTS
         self.backoff_base = backoff_base if backoff_base is not None else settings.RETRY_BACKOFF_BASE
@@ -123,8 +124,12 @@ class Translator:
         )
 
     def _call_gpt(self, texts: list[str]) -> list[str]:
-        """Call GPT-4o to translate Chinese texts to Vietnamese."""
-        # Format texts as numbered list for structured output
+        """Call GPT-4o to translate Chinese texts to Vietnamese.
+        
+        Uses a 2-pass approach in a single call:
+        - First, GPT analyzes the full context (what's happening in the video)
+        - Then translates each line with that context in mind
+        """
         numbered_input = "\n".join(f"{i+1}. {t}" for i, t in enumerate(texts))
 
         response = self.client.chat.completions.create(
@@ -133,29 +138,31 @@ class Translator:
                 {
                     "role": "system",
                     "content": (
-                        "Bạn là chuyên gia dịch thuật Trung-Việt chuyên dịch lời thoại video. "
-                        "Nhiệm vụ:\n"
-                        "1. Sửa lỗi nhận dạng giọng nói (text có thể bị sai do ASR) — đoán nghĩa đúng dựa vào ngữ cảnh\n"
-                        "2. Dịch tự nhiên, sát nghĩa, giữ nguyên giọng điệu và cảm xúc\n"
-                        "3. Thuật ngữ internet/slang Trung Quốc dịch sang tương đương tiếng Việt\n"
-                        "4. Giữ ngắn gọn — câu dịch nên có độ dài tương đương câu gốc\n"
-                        "5. Nếu câu gốc vô nghĩa hoặc chỉ là tiếng ồn, dịch thành '...'\n\n"
-                        "FORMAT OUTPUT: Mỗi dòng gồm [SPEAKER_ID] bản dịch\n"
-                        "- Nếu video chỉ có 1 người nói: tất cả dùng [1]\n"
-                        "- Nếu có nhiều người đối thoại: đánh số [1], [2], [3]... dựa vào ngữ cảnh (ai hỏi, ai trả lời)\n"
-                        "- Phân biệt speaker dựa vào nội dung: câu hỏi vs trả lời, giọng điệu, vai trò trong hội thoại\n\n"
-                        "Ví dụ output:\n"
-                        "[1] Nhanh lên đi\n"
-                        "[2] Đợi tôi chút\n"
-                        "[1] Không đợi được\n"
+                        "Bạn là chuyên gia dịch thuật Trung-Việt, chuyên dịch lời thoại video Douyin/TikTok.\n\n"
+                        "QUY TRÌNH:\n"
+                        "1. Đọc toàn bộ transcript, hiểu NGỮ CẢNH: video nói về gì, ai đang nói với ai, tình huống gì\n"
+                        "2. Sửa lỗi ASR: text gốc từ nhận dạng giọng nói nên có thể sai chính tả, thiếu từ, hoặc nghe nhầm. "
+                        "Hãy đoán từ đúng dựa vào ngữ cảnh\n"
+                        "3. Dịch sát nghĩa, tự nhiên như người Việt nói. KHÔNG dịch từng từ máy móc\n"
+                        "4. Giữ giọng điệu: hài hước → dịch hài, nghiêm túc → dịch nghiêm túc\n"
+                        "5. Slang/internet: 太卷了→quá cuốn, 666→hay quá, 牛→dữ, 老铁→bro/anh em, 安排→lo hết, 摸鱼→lướt mạng/chơi\n"
+                        "6. Câu nào chỉ là tiếng ồn/nhạc/không rõ nghĩa → dịch thành '...'\n\n"
+                        "FORMAT OUTPUT:\n"
+                        "Mỗi dòng: [SPEAKER_ID] bản dịch tiếng Việt\n"
+                        "- Video 1 người: tất cả [1]\n"
+                        "- Video nhiều người đối thoại: [1], [2], [3]... phân biệt dựa vào nội dung\n"
+                        "- ĐÚNG số dòng như input. KHÔNG giải thích."
                     ),
                 },
                 {
                     "role": "user",
-                    "content": f"Dịch {len(texts)} câu thoại từ video Trung Quốc sang tiếng Việt:\n\n{numbered_input}",
+                    "content": (
+                        f"Transcript video Douyin ({len(texts)} câu). "
+                        f"Hãy hiểu ngữ cảnh rồi dịch:\n\n{numbered_input}"
+                    ),
                 },
             ],
-            temperature=0.3,
+            temperature=0.2,
         )
 
         result_text = response.choices[0].message.content.strip()
