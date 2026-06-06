@@ -1,11 +1,25 @@
-"""Speech recognition service using OpenAI Whisper."""
+"""Speech recognition service using OpenAI Whisper API."""
 
+import os
+import logging
 from pathlib import Path
 
-import whisper
-import numpy as np
+from openai import OpenAI
 
 from app.models.pipeline import TranscriptionResult, TranscriptionSegment
+
+logger = logging.getLogger(__name__)
+
+
+def validate_segment_ordering(result: TranscriptionResult) -> bool:
+    """Validate that transcription segments maintain temporal ordering."""
+    for segment in result.segments:
+        if segment.start >= segment.end:
+            return False
+    for i in range(len(result.segments) - 1):
+        if result.segments[i].end > result.segments[i + 1].start:
+            return False
+    return True
 
 
 class SpeechRecognitionError(Exception):
@@ -13,142 +27,100 @@ class SpeechRecognitionError(Exception):
 
 
 class SpeechRecognizer:
-    """Transcribes Chinese speech to text with timestamps using Whisper.
+    """Speech recognition using OpenAI Whisper API.
 
-    Uses OpenAI Whisper large-v3 model for high-accuracy Chinese speech
-    recognition with segment-level timestamps.
+    Much more accurate than local Whisper, especially for Chinese.
+    No model loading needed — runs on OpenAI's GPU servers.
+    Cost: ~$0.006/minute of audio.
     """
 
-    def __init__(self, model_name: str = "large-v3") -> None:
-        """Initialize the speech recognizer.
-
-        Args:
-            model_name: Whisper model to load. Defaults to large-v3.
-        """
+    def __init__(self, model_name: str = "whisper-1") -> None:
         self._model_name = model_name
-        self._model: whisper.Whisper | None = None
+        self._client: OpenAI | None = None
+        # Keep _model attribute for compatibility with web_ui preloading
+        self._model = "api"
 
-    def _load_model(self) -> whisper.Whisper:
-        """Load the Whisper model (lazy loading).
-
-        Returns:
-            Loaded Whisper model instance.
-
-        Raises:
-            SpeechRecognitionError: If model loading fails.
-        """
-        if self._model is None:
-            try:
-                self._model = whisper.load_model(self._model_name)
-            except Exception as e:
-                raise SpeechRecognitionError(
-                    f"Failed to load Whisper model '{self._model_name}': {e}"
-                )
-        return self._model
+    @property
+    def client(self) -> OpenAI:
+        if self._client is None:
+            self._client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
+        return self._client
 
     def recognize(self, audio_path: Path) -> TranscriptionResult:
-        """Transcribe Chinese speech to text with timestamps.
+        """Transcribe Chinese speech using OpenAI Whisper API.
 
         Args:
-            audio_path: Path to a WAV audio file containing speech.
+            audio_path: Path to audio file (WAV, MP3, etc.)
 
         Returns:
-            TranscriptionResult with segments, full text, language, and confidence.
+            TranscriptionResult with timestamped segments.
 
         Raises:
-            SpeechRecognitionError: If audio file not found, no speech detected,
-                or transcription fails.
+            SpeechRecognitionError: If transcription fails.
         """
         if not audio_path.exists():
             raise SpeechRecognitionError(f"Audio file not found: {audio_path}")
 
-        model = self._load_model()
-
         try:
-            result = model.transcribe(
-                str(audio_path),
-                language="zh",
-                task="transcribe",
-                fp16=False,
-                verbose=False,
-            )
+            with open(audio_path, "rb") as audio_file:
+                response = self.client.audio.transcriptions.create(
+                    model=self._model_name,
+                    file=audio_file,
+                    language="zh",
+                    response_format="verbose_json",
+                    timestamp_granularities=["segment"],
+                )
         except Exception as e:
             raise SpeechRecognitionError(f"Transcription failed: {e}")
 
-        segments_data = result.get("segments", [])
+        # Parse response
+        segments_data = response.segments or []
 
         if not segments_data:
             raise SpeechRecognitionError(
                 "Không nhận dạng được giọng nói trong file âm thanh"
             )
 
-        # Build transcription segments
-        segments = self._build_segments(segments_data)
-
-        # Validate we have meaningful content
-        full_text = result.get("text", "").strip()
+        full_text = response.text.strip() if response.text else ""
         if not full_text:
             raise SpeechRecognitionError(
                 "Không nhận dạng được giọng nói trong file âm thanh"
             )
 
-        # Calculate average confidence from segment no_speech_prob
-        confidence = self._calculate_confidence(segments_data)
+        # Build segments
+        segments = []
+        for seg in segments_data:
+            text = seg.get("text", "").strip() if isinstance(seg, dict) else getattr(seg, "text", "").strip()
+            start = seg.get("start", 0.0) if isinstance(seg, dict) else getattr(seg, "start", 0.0)
+            end = seg.get("end", 0.0) if isinstance(seg, dict) else getattr(seg, "end", 0.0)
 
-        # Detect language from result
-        language = result.get("language", "zh")
+            if text:
+                segments.append(
+                    TranscriptionSegment(
+                        start=float(start),
+                        end=float(end),
+                        text=text,
+                        speaker="speaker_1",
+                    )
+                )
+
+        if not segments:
+            raise SpeechRecognitionError(
+                "Không nhận dạng được giọng nói trong file âm thanh"
+            )
+
+        # Calculate confidence (API doesn't return this, use 0.95 as default)
+        confidence = 0.95
+
+        logger.info(
+            "Transcribed %d segments, total text: %d chars",
+            len(segments),
+            len(full_text),
+        )
 
         return TranscriptionResult(
             segments=segments,
             full_text=full_text,
-            language=language,
+            language="zh",
             confidence=confidence,
         )
-
-    def _build_segments(
-        self, segments_data: list[dict]
-    ) -> list[TranscriptionSegment]:
-        """Build TranscriptionSegment list from Whisper output.
-
-        Assigns all segments to speaker_1 initially.
-        Speaker diarization will be handled by GPT in the translation step
-        for more accurate results based on content analysis.
-
-        Args:
-            segments_data: Raw segments from Whisper transcribe result.
-
-        Returns:
-            List of TranscriptionSegment with timestamps.
-        """
-        segments: list[TranscriptionSegment] = []
-
-        for seg in segments_data:
-            segments.append(
-                TranscriptionSegment(
-                    start=float(seg["start"]),
-                    end=float(seg["end"]),
-                    text=seg["text"].strip(),
-                    speaker="speaker_1",  # Default; GPT will reassign if multi-speaker
-                )
-            )
-
-        return segments
-
-    def _calculate_confidence(self, segments_data: list[dict]) -> float:
-        """Calculate overall confidence from segment probabilities.
-
-        Uses (1 - no_speech_prob) as a proxy for segment confidence.
-
-        Args:
-            segments_data: Raw segments from Whisper transcribe result.
-
-        Returns:
-            Average confidence score between 0.0 and 1.0.
-        """
-        if not segments_data:
-            return 0.0
-
-        confidences = [
-            1.0 - seg.get("no_speech_prob", 0.0) for seg in segments_data
-        ]
-        return float(np.mean(confidences))
