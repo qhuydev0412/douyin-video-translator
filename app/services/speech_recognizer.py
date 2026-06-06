@@ -69,6 +69,7 @@ class SpeechRecognizer:
                 str(audio_path),
                 language="zh",
                 task="transcribe",
+                fp16=False,
                 verbose=False,
             )
         except Exception as e:

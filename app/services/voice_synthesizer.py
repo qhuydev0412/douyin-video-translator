@@ -68,13 +68,19 @@ class VoiceSynthesizer:
                 logger.warning("Segment %d has empty translated text, skipping", i)
                 continue
 
+            # Clean text for TTS (remove special chars that cause "No audio received")
+            clean_text = self._clean_text_for_tts(segment.translated_text)
+            if not clean_text:
+                logger.warning("Segment %d has no speakable text after cleaning, skipping", i)
+                continue
+
             target_duration = segment.end - segment.start
             segment_path = output_dir / f"segment_{i:04d}.mp3"
 
             try:
                 voice = self.select_voice(segment.speaker)
                 segment_audio = await self._synthesize_segment(
-                    text=segment.translated_text,
+                    text=clean_text,
                     voice=voice,
                     target_duration=target_duration,
                     output_path=segment_path,
@@ -93,7 +99,7 @@ class VoiceSynthesizer:
                 # Graceful degradation: try default voice
                 try:
                     segment_audio = await self._synthesize_segment(
-                        text=segment.translated_text,
+                        text=clean_text,
                         voice=DEFAULT_VOICE,
                         target_duration=target_duration,
                         output_path=segment_path,
@@ -102,14 +108,12 @@ class VoiceSynthesizer:
                     )
                     segment_audios.append(segment_audio)
                 except Exception as fallback_err:
-                    logger.error(
-                        "Failed to synthesize segment %d even with default voice: %s",
+                    # Skip this segment instead of crashing
+                    logger.warning(
+                        "Skipping segment %d — TTS failed for both voices: %s",
                         i,
                         str(fallback_err),
                     )
-                    raise VoiceSynthesizerError(
-                        f"Voice synthesis failed for segment {i}: {fallback_err}"
-                    ) from fallback_err
 
         if not segment_audios:
             raise VoiceSynthesizerError("No segments were synthesized successfully")
@@ -122,6 +126,25 @@ class VoiceSynthesizer:
             "Voice synthesis completed: %d segments synthesized", len(segment_audios)
         )
         return SynthesisResult(audio_path=combined_path, segment_audios=segment_audios)
+
+    @staticmethod
+    def _clean_text_for_tts(text: str) -> str:
+        """Clean text to avoid edge-tts 'No audio received' errors.
+
+        Removes characters that TTS cannot pronounce (emojis, special symbols,
+        lone punctuation). Returns empty string if nothing speakable remains.
+        """
+        import re
+        # Remove emojis and special Unicode symbols
+        cleaned = re.sub(r'[\U00010000-\U0010ffff]', '', text)
+        # Remove standalone special characters that TTS can't read
+        cleaned = re.sub(r'[#@*~`|\\<>{}[\]^]', '', cleaned)
+        # Collapse multiple spaces/newlines
+        cleaned = re.sub(r'\s+', ' ', cleaned).strip()
+        # If only punctuation remains, return empty
+        if cleaned and not re.search(r'[\w\u00C0-\u024F\u1E00-\u1EFF\u4e00-\u9fff]', cleaned):
+            return ""
+        return cleaned
 
     def select_voice(self, speaker: str | None) -> str:
         """Select appropriate Vietnamese voice for speaker.
