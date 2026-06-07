@@ -19,6 +19,9 @@ MALE_VOICES = ["echo", "onyx", "alloy"]
 FEMALE_VOICES = ["nova", "shimmer", "fable"]
 DEFAULT_VOICE = "nova"
 
+# All available Vietnamese TTS voices in assignment order
+VIETNAMESE_VOICES = ["nova", "onyx", "shimmer", "echo", "alloy", "fable"]
+
 # Maximum speed multiplier
 MAX_SPEED_MULTIPLIER = 2.0
 
@@ -55,11 +58,17 @@ class VoiceSynthesizer:
         return self._client
 
     async def synthesize(
-        self, translation: TranslationResult, output_dir: Path
+        self, translation: TranslationResult, output_dir: Path, voice: str | None = None
     ) -> SynthesisResult:
         """Generate Vietnamese TTS audio for each segment.
 
         Synthesizes all segments in parallel for speed.
+
+        Args:
+            translation: The translation result containing segments to synthesize.
+            output_dir: Directory to store generated audio files.
+            voice: Optional voice ID to use for all segments. If None, auto-selects
+                based on speaker labels.
         """
         output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -82,12 +91,13 @@ class VoiceSynthesizer:
 
             target_duration = segment.end - segment.start
             segment_path = output_dir / f"segment_{i:04d}.mp3"
-            voice = self.select_voice(segment.speaker)
+            # Use explicit voice if provided, otherwise auto-select by speaker
+            segment_voice = voice if voice else self.select_voice(segment.speaker)
 
             tasks.append({
                 "index": i,
                 "text": clean_text,
-                "voice": voice,
+                "voice": segment_voice,
                 "target_duration": target_duration,
                 "output_path": segment_path,
                 "start": segment.start,
@@ -142,6 +152,7 @@ class VoiceSynthesizer:
 
         Uses a single consistent voice for the primary speaker.
         Only assigns different voice if there are clearly multiple speakers.
+        Cycles through VIETNAMESE_VOICES in round-robin order.
         """
         if speaker is None:
             return DEFAULT_VOICE
@@ -149,16 +160,7 @@ class VoiceSynthesizer:
         if speaker in self._speaker_voice_map:
             return self._speaker_voice_map[speaker]
 
-        # First speaker always gets default female voice (most natural for narration)
-        if self._speaker_count == 0:
-            voice = "nova"  # Female, warm — good for narration
-        elif self._speaker_count == 1:
-            voice = "onyx"  # Male, deep — contrasting voice
-        elif self._speaker_count == 2:
-            voice = "shimmer"  # Female, soft
-        else:
-            voice = MALE_VOICES[self._male_index % len(MALE_VOICES)]
-            self._male_index += 1
+        voice = VIETNAMESE_VOICES[self._speaker_count % len(VIETNAMESE_VOICES)]
 
         self._speaker_count += 1
         self._speaker_voice_map[speaker] = voice

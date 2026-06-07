@@ -237,6 +237,48 @@ class JobStore:
 
         logger.debug("Deleted job record %s", job_id)
 
+    def list_awaiting_confirmation_job_ids(self) -> list[str]:
+        """List all job IDs with AWAITING_CONFIRMATION status.
+
+        Uses Redis SCAN to iterate all job keys and filters by status.
+        This is acceptable for periodic task usage (runs every 30s, not
+        performance-critical).
+
+        Returns:
+            List of job IDs currently in AWAITING_CONFIRMATION status.
+
+        Raises:
+            JobStoreError: If the Redis operation fails.
+        """
+        awaiting_ids: list[str] = []
+        cursor = 0
+        pattern = f"{JOB_KEY_PREFIX}*"
+
+        try:
+            while True:
+                cursor, keys = self._redis.scan(
+                    cursor=cursor, match=pattern, count=100
+                )
+                for key in keys:
+                    raw = self._redis.get(key)
+                    if raw is None:
+                        continue
+                    try:
+                        job = JobState.model_validate_json(raw)
+                        if job.status == JobStatus.AWAITING_CONFIRMATION:
+                            awaiting_ids.append(job.job_id)
+                    except Exception:
+                        # Skip malformed entries
+                        logger.warning("Failed to parse job data for key %s", key)
+                if cursor == 0:
+                    break
+        except redis.RedisError as exc:
+            raise JobStoreError(
+                f"Failed to scan awaiting confirmation jobs: {exc}", original=exc
+            )
+
+        return awaiting_ids
+
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------

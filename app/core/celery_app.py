@@ -35,6 +35,10 @@ celery_app.conf.beat_schedule = {
         "task": "cleanup_expired_jobs",
         "schedule": crontab(minute=0),  # Every hour at :00
     },
+    "check-checkpoint-expiry": {
+        "task": "check_checkpoint_expiry",
+        "schedule": 30.0,  # Every 30 seconds
+    },
 }
 
 # Auto-discover tasks from the app.tasks package

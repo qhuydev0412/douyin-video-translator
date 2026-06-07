@@ -1,23 +1,32 @@
 """FastAPI REST API routes for the Douyin Video Translator."""
 
+import json
 import logging
 import uuid
 from datetime import datetime, timezone
-from typing import Protocol
+from pathlib import Path
+from typing import TYPE_CHECKING, Protocol
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from starlette.status import HTTP_202_ACCEPTED, HTTP_404_NOT_FOUND
 
 from app.api.dependencies import RateLimiter
-from app.models.job import JobState, JobStatus
+from app.models.job import CheckpointType, JobState, JobStatus
 from app.models.schemas import (
     CancelResponse,
     ErrorResponse,
     JobStatusResponse,
+    PreviewData,
+    TranscriptionPreviewSegment,
     TranslateRequest,
     TranslateResponse,
+    TranslationPreviewSegment,
+    VoiceOptionResponse,
 )
 from app.services.downloader import VideoDownloader
+
+if TYPE_CHECKING:
+    from app.services.checkpoint_manager import CheckpointManager
 
 logger = logging.getLogger(__name__)
 
@@ -62,23 +71,27 @@ _job_store: JobStoreProtocol | None = None
 _rate_limiter: RateLimiter | None = None
 _task_enqueuer: TaskEnqueuer | None = None
 _downloader: VideoDownloader | None = None
+_checkpoint_manager: "CheckpointManager | None" = None
 
 
 def configure_routes(
     job_store: JobStoreProtocol,
     task_enqueuer: TaskEnqueuer | None = None,
+    checkpoint_manager: "CheckpointManager | None" = None,
 ) -> None:
     """Configure route dependencies. Called during app startup.
 
     Args:
         job_store: Job state store implementation.
         task_enqueuer: Task enqueuer (defaults to CeleryTaskEnqueuer).
+        checkpoint_manager: Optional CheckpointManager for checkpoint operations.
     """
-    global _job_store, _rate_limiter, _task_enqueuer, _downloader  # noqa: PLW0603
+    global _job_store, _rate_limiter, _task_enqueuer, _downloader, _checkpoint_manager  # noqa: PLW0603
     _job_store = job_store
     _rate_limiter = RateLimiter(job_store)
     _task_enqueuer = task_enqueuer or CeleryTaskEnqueuer()
     _downloader = VideoDownloader()
+    _checkpoint_manager = checkpoint_manager
 
 
 def _get_job_store() -> JobStoreProtocol:
@@ -107,6 +120,11 @@ def _get_downloader() -> VideoDownloader:
     if _downloader is None:
         raise RuntimeError("Routes not configured. Call configure_routes() first.")
     return _downloader
+
+
+def _get_checkpoint_manager_optional() -> "CheckpointManager | None":
+    """Get the configured checkpoint manager (may be None)."""
+    return _checkpoint_manager
 
 
 @router.post(
@@ -185,6 +203,8 @@ def get_job_status(
     """Get the current status of a translation job.
 
     Returns job details including progress, current step, and download URL.
+    When the job is at a checkpoint, includes preview data and resets the
+    24-hour expiration timer.
     """
     try:
         job = job_store.get_job(job_id)
@@ -200,6 +220,26 @@ def get_job_status(
             },
         )
 
+    # Handle checkpoint preview data
+    checkpoint_type_value: str | None = None
+    preview_data: PreviewData | None = None
+
+    if job.status == JobStatus.AWAITING_CONFIRMATION and job.checkpoint_type:
+        checkpoint_type_value = job.checkpoint_type.value
+
+        # Reset expiration timer (Requirement 7.3)
+        checkpoint_manager = _get_checkpoint_manager_optional()
+        if checkpoint_manager:
+            checkpoint_manager.reset_expiration(job_id)
+
+        # Load preview data based on checkpoint type
+        if job.checkpoint_type == CheckpointType.TRANSCRIPTION:
+            preview_data = _load_transcription_preview(job)
+        elif job.checkpoint_type == CheckpointType.TRANSLATION:
+            preview_data = _load_translation_preview(job)
+        elif job.checkpoint_type == CheckpointType.VOICE_SELECTION:
+            preview_data = _load_voice_selection_preview(job)
+
     return JobStatusResponse(
         job_id=job.job_id,
         status=job.status.value,
@@ -210,6 +250,8 @@ def get_job_status(
         error=job.error,
         created_at=job.created_at,
         expires_at=job.expires_at,
+        checkpoint_type=checkpoint_type_value,
+        preview_data=preview_data,
     )
 
 
@@ -255,6 +297,93 @@ def cancel_job(
         job_id=job_id,
         status=JobStatus.CANCELLED.value,
     )
+
+
+def _load_transcription_preview(job: JobState) -> PreviewData | None:
+    """Load transcription segments from the job's artifact file.
+
+    Reads the transcription JSON and maps segments to TranscriptionPreviewSegment.
+    """
+    transcription_path_str = job.artifacts.get("transcription_path")
+    if not transcription_path_str:
+        return None
+
+    transcription_path = Path(transcription_path_str)
+    if not transcription_path.exists():
+        return None
+
+    try:
+        with open(transcription_path, "r", encoding="utf-8") as f:
+            transcription_data = json.load(f)
+    except (json.JSONDecodeError, OSError) as exc:
+        logger.warning("Failed to load transcription preview for job %s: %s", job.job_id, exc)
+        return None
+
+    segments = transcription_data.get("segments", [])
+    preview_segments = [
+        TranscriptionPreviewSegment(
+            index=i,
+            start=seg["start"],
+            end=seg["end"],
+            text=seg["text"],
+            confidence=seg.get("confidence", 0.0),
+        )
+        for i, seg in enumerate(segments)
+    ]
+
+    return PreviewData(transcription_segments=preview_segments)
+
+
+def _load_translation_preview(job: JobState) -> PreviewData | None:
+    """Load translation segments from the job's artifact file.
+
+    Reads the translation JSON and maps segments to TranslationPreviewSegment.
+    """
+    translation_path_str = job.artifacts.get("translation_path")
+    if not translation_path_str:
+        return None
+
+    translation_path = Path(translation_path_str)
+    if not translation_path.exists():
+        return None
+
+    try:
+        with open(translation_path, "r", encoding="utf-8") as f:
+            translation_data = json.load(f)
+    except (json.JSONDecodeError, OSError) as exc:
+        logger.warning("Failed to load translation preview for job %s: %s", job.job_id, exc)
+        return None
+
+    segments = translation_data.get("segments", [])
+    preview_segments = [
+        TranslationPreviewSegment(
+            index=i,
+            start=seg["start"],
+            end=seg["end"],
+            original_text=seg["text"],
+            translated_text=seg["translated_text"],
+        )
+        for i, seg in enumerate(segments)
+    ]
+
+    return PreviewData(translation_segments=preview_segments)
+
+
+def _load_voice_selection_preview(job: JobState) -> PreviewData | None:
+    """Build voice selection preview from the job's voice_options field."""
+    if not job.voice_options:
+        return None
+
+    voice_options = [
+        VoiceOptionResponse(
+            voice_id=opt.voice_id,
+            voice_name=opt.voice_name,
+            preview_url=opt.preview_url,
+        )
+        for opt in job.voice_options
+    ]
+
+    return PreviewData(voice_options=voice_options)
 
 
 def _get_client_ip(request: Request) -> str:

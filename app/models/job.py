@@ -12,9 +12,19 @@ class JobStatus(str, Enum):
 
     QUEUED = "queued"
     PROCESSING = "processing"
+    AWAITING_CONFIRMATION = "awaiting_confirmation"
     COMPLETED = "completed"
     FAILED = "failed"
     CANCELLED = "cancelled"
+    EXPIRED = "expired"
+
+
+class CheckpointType(str, Enum):
+    """Types of checkpoints where the pipeline pauses for user confirmation."""
+
+    TRANSCRIPTION = "transcription"
+    TRANSLATION = "translation"
+    VOICE_SELECTION = "voice_selection"
 
 
 class PipelineStep(str, Enum):
@@ -36,6 +46,14 @@ class VideoInfo(BaseModel):
     file_size_bytes: int
     resolution: str
     title: Optional[str] = None
+
+
+class VoiceOption(BaseModel):
+    """A voice option for TTS preview with name, ID, and audio preview URL."""
+
+    voice_id: str
+    voice_name: str
+    preview_url: str
 
 
 class ErrorDetail(BaseModel):
@@ -63,3 +81,7 @@ class JobState(BaseModel):
     expires_at: Optional[datetime] = None
     work_dir: str
     artifacts: dict[str, str] = Field(default_factory=dict)
+    checkpoint_type: Optional[CheckpointType] = None
+    checkpoint_entered_at: Optional[datetime] = None
+    confirmation_lock: bool = False
+    voice_options: Optional[list[VoiceOption]] = None

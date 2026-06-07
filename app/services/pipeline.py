@@ -1,12 +1,14 @@
 """Pipeline orchestrator for the Douyin video translation workflow."""
 
+from __future__ import annotations
+
 import json
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Optional, Protocol
 
-from app.models.job import JobState, JobStatus, PipelineStep
+from app.models.job import CheckpointType, JobState, JobStatus, PipelineStep
 from app.models.pipeline import (
     DownloadResult,
     SynthesisResult,
@@ -23,6 +25,10 @@ from app.services.translator import Translator
 from app.services.video_composer import VideoComposer
 from app.services.vocal_isolator import VocalIsolator
 from app.services.voice_synthesizer import VoiceSynthesizer
+
+if TYPE_CHECKING:
+    from app.services.checkpoint_manager import CheckpointManager
+    from app.services.voice_preview import VoicePreviewGenerator
 
 logger = logging.getLogger(__name__)
 
@@ -48,6 +54,13 @@ STEP_ORDER: list[PipelineStep] = [
     PipelineStep.COMPOSING_VIDEO,
 ]
 
+# Mapping of pipeline steps that trigger a checkpoint pause after completion
+CHECKPOINT_AFTER_STEP: dict[PipelineStep, CheckpointType] = {
+    PipelineStep.RECOGNIZING_SPEECH: CheckpointType.TRANSCRIPTION,
+    PipelineStep.TRANSLATING: CheckpointType.TRANSLATION,
+    PipelineStep.SYNTHESIZING_VOICE: CheckpointType.VOICE_SELECTION,
+}
+
 
 class PipelineError(Exception):
     """Raised when a pipeline step fails."""
@@ -68,6 +81,15 @@ class CancellationError(Exception):
         self.step = step
 
 
+class CheckpointPauseSignal(Exception):
+    """Raised when pipeline pauses at a checkpoint. Not an error — signals clean task completion."""
+
+    def __init__(self, job_id: str, checkpoint_type: CheckpointType):
+        super().__init__(f"Pipeline paused at checkpoint {checkpoint_type.value} for job {job_id}")
+        self.job_id = job_id
+        self.checkpoint_type = checkpoint_type
+
+
 @dataclass
 class PipelineResult:
     """Result of a completed pipeline execution."""
@@ -83,6 +105,10 @@ class JobStoreProtocol(Protocol):
     def get_job(self, job_id: str) -> JobState: ...
 
     def update_job(self, job_id: str, **kwargs: object) -> None: ...
+
+    def delete_job(self, job_id: str) -> None: ...
+
+    def list_awaiting_confirmation_job_ids(self) -> list[str]: ...
 
 
 class TranslationPipeline:
@@ -105,6 +131,8 @@ class TranslationPipeline:
         synthesizer: VoiceSynthesizer,
         composer: VideoComposer,
         job_store: JobStoreProtocol,
+        checkpoint_manager: Optional[CheckpointManager] = None,
+        voice_preview_generator: Optional[VoicePreviewGenerator] = None,
     ) -> None:
         self._downloader = downloader
         self._extractor = extractor
@@ -114,8 +142,10 @@ class TranslationPipeline:
         self._synthesizer = synthesizer
         self._composer = composer
         self._job_store = job_store
+        self._checkpoint_manager = checkpoint_manager
+        self._voice_preview_generator = voice_preview_generator
 
-    async def execute(self, job_id: str, url: str) -> PipelineResult:
+    async def execute(self, job_id: str, url: str) -> Optional[PipelineResult]:
         """Execute the full translation pipeline with progress tracking.
 
         Args:
@@ -123,7 +153,8 @@ class TranslationPipeline:
             url: Douyin video URL to process.
 
         Returns:
-            PipelineResult with the output video path and all artifacts.
+            PipelineResult with the output video path and all artifacts,
+            or None if the pipeline paused at a checkpoint.
 
         Raises:
             PipelineError: If any step fails.
@@ -133,25 +164,36 @@ class TranslationPipeline:
         work_dir = Path(job_state.work_dir)
         work_dir.mkdir(parents=True, exist_ok=True)
 
-        return await self._run_steps(
-            job_id=job_id,
-            url=url,
-            work_dir=work_dir,
-            from_step_index=0,
-            artifacts=dict(job_state.artifacts),
-        )
+        artifacts = dict(job_state.artifacts)
 
-    async def resume(self, job_id: str, from_step: str) -> PipelineResult:
-        """Resume pipeline from a specific step (for retry after failure).
+        try:
+            return await self._run_steps(
+                job_id=job_id,
+                url=url,
+                work_dir=work_dir,
+                from_step_index=0,
+                artifacts=artifacts,
+            )
+        except CheckpointPauseSignal:
+            # Pipeline paused at a checkpoint — persist current artifacts and return None
+            self._job_store.update_job(job_id, artifacts=artifacts)
+            return None
 
-        Skips steps that already have artifacts stored in job state.
+    async def resume(self, job_id: str, from_step: str) -> Optional[PipelineResult]:
+        """Resume pipeline from a specific step (after checkpoint confirmation or retry).
+
+        Loads artifacts from job state and continues from the specified step.
+        When resuming after a checkpoint confirmation, the CheckpointManager has
+        already applied any user edits to the artifact files on disk, so the
+        pipeline naturally uses the edited data when loading them.
 
         Args:
             job_id: Unique job identifier.
             from_step: PipelineStep value to resume from.
 
         Returns:
-            PipelineResult with the output video path and all artifacts.
+            PipelineResult with the output video path and all artifacts,
+            or None if the pipeline paused at another checkpoint.
 
         Raises:
             PipelineError: If any step fails.
@@ -170,13 +212,20 @@ class TranslationPipeline:
         work_dir = Path(job_state.work_dir)
         url = job_state.url
 
-        return await self._run_steps(
-            job_id=job_id,
-            url=url,
-            work_dir=work_dir,
-            from_step_index=from_step_index,
-            artifacts=dict(job_state.artifacts),
-        )
+        artifacts = dict(job_state.artifacts)
+
+        try:
+            return await self._run_steps(
+                job_id=job_id,
+                url=url,
+                work_dir=work_dir,
+                from_step_index=from_step_index,
+                artifacts=artifacts,
+            )
+        except CheckpointPauseSignal:
+            # Pipeline paused at another checkpoint — persist current artifacts and return None
+            self._job_store.update_job(job_id, artifacts=artifacts)
+            return None
 
     async def _run_steps(
         self,
@@ -224,7 +273,7 @@ class TranslationPipeline:
 
             try:
                 await self._execute_step(step, job_id, url, work_dir, artifacts)
-            except (PipelineError, CancellationError):
+            except (PipelineError, CancellationError, CheckpointPauseSignal):
                 raise
             except Exception as e:
                 logger.error(
@@ -314,10 +363,28 @@ class TranslationPipeline:
         elif step == PipelineStep.SYNTHESIZING_VOICE:
             translation_path = Path(artifacts["translation_path"])
             translation_data = self._load_translation(translation_path)
-            synthesis: SynthesisResult = await self._synthesizer.synthesize(
-                translation_data, work_dir
-            )
-            artifacts["vietnamese_audio"] = str(synthesis.audio_path)
+
+            # If no voice has been selected yet, generate previews first
+            if "selected_voice_id" not in artifacts and self._voice_preview_generator is not None:
+                voice_options = await self._voice_preview_generator.generate_previews(
+                    translation=translation_data,
+                    work_dir=work_dir,
+                    job_id=job_id,
+                )
+                previews_dir = work_dir / "voice_previews"
+                artifacts["voice_previews_dir"] = str(previews_dir)
+                # Store voice options in job state for the status API
+                self._job_store.update_job(
+                    job_id,
+                    voice_options=[opt.model_dump() for opt in voice_options],
+                )
+            else:
+                # Full synthesis with selected voice (or default if no preview generator)
+                selected_voice = artifacts.get("selected_voice_id")
+                synthesis: SynthesisResult = await self._synthesizer.synthesize(
+                    translation_data, work_dir, voice=selected_voice
+                )
+                artifacts["vietnamese_audio"] = str(synthesis.audio_path)
 
         elif step == PipelineStep.COMPOSING_VIDEO:
             video_path_comp = Path(artifacts["video_path"])
@@ -328,6 +395,12 @@ class TranslationPipeline:
                 video_path_comp, vietnamese_audio, background_audio, output_dir
             )
             artifacts["output_video"] = str(output_path)
+
+        # Check if the completed step triggers a checkpoint pause
+        if self._checkpoint_manager is not None and step in CHECKPOINT_AFTER_STEP:
+            checkpoint_type = CHECKPOINT_AFTER_STEP[step]
+            self._checkpoint_manager.pause_at_checkpoint(job_id, checkpoint_type)
+            raise CheckpointPauseSignal(job_id=job_id, checkpoint_type=checkpoint_type)
 
     def _check_cancellation(self, job_id: str, step: PipelineStep) -> None:
         """Check if the job has been cancelled.

@@ -6,7 +6,10 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
+from app.api import confirmation_routes
+from app.api.confirmation_routes import configure_confirmation_routes
 from app.api.routes import configure_routes, router
+from app.services.checkpoint_manager import CheckpointManager
 from app.services.job_store import JobStore
 
 logger = logging.getLogger(__name__)
@@ -37,10 +40,13 @@ def create_app() -> FastAPI:
 
     # Configure route dependencies
     job_store = JobStore()
-    configure_routes(job_store=job_store)
+    checkpoint_manager = CheckpointManager(job_store)
+    configure_routes(job_store=job_store, checkpoint_manager=checkpoint_manager)
+    configure_confirmation_routes(checkpoint_manager=checkpoint_manager)
 
-    # Include API router
+    # Include API routers
     app.include_router(router)
+    app.include_router(confirmation_routes.router)
 
     # Global exception handlers
     _register_exception_handlers(app)

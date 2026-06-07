@@ -33,15 +33,24 @@ def _create_pipeline(job_store: JobStoreProtocol) -> TranslationPipeline:
     Returns:
         Configured TranslationPipeline instance.
     """
+    from app.services.checkpoint_manager import CheckpointManager
+    from app.services.voice_preview import VoicePreviewGenerator
+
+    synthesizer = VoiceSynthesizer()
+    checkpoint_manager = CheckpointManager(job_store)
+    voice_preview_generator = VoicePreviewGenerator(synthesizer)
+
     return TranslationPipeline(
         downloader=VideoDownloader(),
         extractor=AudioExtractor(),
         isolator=VocalIsolator(),
         recognizer=SpeechRecognizer(),
         translator=Translator(),
-        synthesizer=VoiceSynthesizer(),
+        synthesizer=synthesizer,
         composer=VideoComposer(),
         job_store=job_store,
+        checkpoint_manager=checkpoint_manager,
+        voice_preview_generator=voice_preview_generator,
     )
 
 
@@ -74,6 +83,12 @@ def translate_video_task(self: Task, job_id: str, url: str) -> dict[str, str]:
 
     try:
         result = asyncio.run(pipeline.execute(job_id, url))
+
+        if result is None:
+            # Pipeline paused at a checkpoint — task completes cleanly
+            logger.info("Pipeline paused at checkpoint for job %s", job_id)
+            return {"job_id": job_id, "status": "paused"}
+
         logger.info("Translation completed for job %s: %s", job_id, result.output_path)
         return {"job_id": job_id, "output_path": str(result.output_path)}
 
