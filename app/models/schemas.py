@@ -36,12 +36,24 @@ class VoiceOptionResponse(BaseModel):
     preview_url: str
 
 
+class AudioPreviewSegment(BaseModel):
+    """A single segment for the audio preview checkpoint — includes voice."""
+
+    index: int
+    start: float
+    end: float
+    original_text: str
+    translated_text: str
+    voice: str
+
+
 class PreviewData(BaseModel):
     """Preview data included in the job status response at checkpoints."""
 
     transcription_segments: Optional[list[TranscriptionPreviewSegment]] = None
     translation_segments: Optional[list[TranslationPreviewSegment]] = None
     voice_options: Optional[list[VoiceOptionResponse]] = None
+    audio_preview_segments: Optional[list[AudioPreviewSegment]] = None
 
 
 class TranslateRequest(BaseModel):

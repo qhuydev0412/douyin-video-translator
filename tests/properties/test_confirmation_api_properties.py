@@ -85,7 +85,7 @@ class FakeResumeTaskEnqueuer:
 CHECKPOINT_NEXT_STEP: dict[CheckpointType, PipelineStep] = {
     CheckpointType.TRANSCRIPTION: PipelineStep.TRANSLATING,
     CheckpointType.TRANSLATION: PipelineStep.SYNTHESIZING_VOICE,
-    CheckpointType.VOICE_SELECTION: PipelineStep.COMPOSING_VIDEO,
+    CheckpointType.VOICE_SELECTION: PipelineStep.SYNTHESIZING_VOICE,
 }
 
 # Mapping from checkpoint type to confirmation endpoint path suffix

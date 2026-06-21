@@ -243,8 +243,12 @@ class TestConfirmAndResume:
 
         assert next_step == PipelineStep.SYNTHESIZING_VOICE
 
-    def test_confirm_voice_selection_returns_composing_video(self):
-        """confirm_and_resume after VOICE_SELECTION checkpoint returns COMPOSING_VIDEO."""
+    def test_confirm_voice_selection_returns_synthesizing_voice(self):
+        """confirm_and_resume after VOICE_SELECTION checkpoint returns SYNTHESIZING_VOICE.
+
+        The pipeline must re-run SYNTHESIZING_VOICE to perform the actual TTS
+        using the selected voice (preview generation only happened on the first run).
+        """
         job = _make_job_state(
             status=JobStatus.AWAITING_CONFIRMATION,
             checkpoint_type=CheckpointType.VOICE_SELECTION,
@@ -256,7 +260,7 @@ class TestConfirmAndResume:
 
         next_step = manager.confirm_and_resume("job-001")
 
-        assert next_step == PipelineStep.COMPOSING_VIDEO
+        assert next_step == PipelineStep.SYNTHESIZING_VOICE
 
     def test_confirm_sets_status_to_processing(self):
         """confirm_and_resume transitions job status to PROCESSING."""

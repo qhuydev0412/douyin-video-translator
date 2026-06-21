@@ -40,8 +40,10 @@ def resume_pipeline_task(self: Task, job_id: str, from_step: str) -> dict[str, s
     from app.services.audio_extractor import AudioExtractor
     from app.services.checkpoint_manager import CheckpointManager
     from app.services.downloader import VideoDownloader
+    from app.services.gender_detector import GenderDetector
     from app.services.job_store import JobStore
     from app.services.speech_recognizer import SpeechRecognizer
+    from app.services.subtitle_extractor import SubtitleExtractor
     from app.services.translator import Translator
     from app.services.video_composer import VideoComposer
     from app.services.vocal_isolator import VocalIsolator
@@ -66,6 +68,8 @@ def resume_pipeline_task(self: Task, job_id: str, from_step: str) -> dict[str, s
         job_store=job_store,
         checkpoint_manager=checkpoint_manager,
         voice_preview_generator=voice_preview_generator,
+        gender_detector=GenderDetector(),
+        subtitle_extractor=SubtitleExtractor(),
     )
 
     try:
@@ -95,6 +99,7 @@ def resume_pipeline_task(self: Task, job_id: str, from_step: str) -> dict[str, s
                 "step": exc.step.value,
                 "message": exc.message,
                 "retryable": exc.retryable,
+                "retry_count": 0,
             },
         )
         raise
@@ -112,6 +117,7 @@ def resume_pipeline_task(self: Task, job_id: str, from_step: str) -> dict[str, s
                 "step": from_step,
                 "message": f"Unexpected error: {exc}",
                 "retryable": False,
+                "retry_count": 0,
             },
         )
         raise

@@ -25,6 +25,7 @@ class CheckpointType(str, Enum):
     TRANSCRIPTION = "transcription"
     TRANSLATION = "translation"
     VOICE_SELECTION = "voice_selection"
+    AUDIO_PREVIEW = "audio_preview"
 
 
 class PipelineStep(str, Enum):

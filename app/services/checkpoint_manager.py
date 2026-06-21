@@ -10,7 +10,7 @@ import shutil
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from app.models.confirmation_schemas import SegmentEdit, TranslationEdit
+from app.models.confirmation_schemas import AudioPreviewEdit, SegmentEdit, TranslationEdit
 from app.models.job import CheckpointType, JobState, JobStatus, PipelineStep
 from app.services.pipeline import JobStoreProtocol
 
@@ -24,7 +24,7 @@ CHECKPOINT_EXPIRATION_HOURS = 24
 CHECKPOINT_NEXT_STEP: dict[CheckpointType, PipelineStep] = {
     CheckpointType.TRANSCRIPTION: PipelineStep.TRANSLATING,
     CheckpointType.TRANSLATION: PipelineStep.SYNTHESIZING_VOICE,
-    CheckpointType.VOICE_SELECTION: PipelineStep.COMPOSING_VIDEO,
+    CheckpointType.VOICE_SELECTION: PipelineStep.SYNTHESIZING_VOICE,
 }
 
 
@@ -315,6 +315,51 @@ class CheckpointManager:
             len(edits),
             job_id,
             len(segments),
+        )
+
+    def apply_audio_preview_edits(
+        self, job_id: str, edits: list[AudioPreviewEdit]
+    ) -> None:
+        """Apply text and/or voice edits from the audio preview checkpoint.
+
+        Updates translation.json for text changes and segment_voices.json for voice changes.
+        """
+        job = self._job_store.get_job(job_id)
+
+        text_edits = [e for e in edits if e.translated_text is not None]
+        voice_edits = [e for e in edits if e.voice is not None]
+
+        # Apply text edits to translation.json
+        if text_edits:
+            translation_path = Path(job.artifacts["translation_path"])
+            with open(translation_path, "r", encoding="utf-8") as f:
+                translation_data = json.load(f)
+            segments = translation_data["segments"]
+            segment_count = len(segments)
+            for edit in text_edits:
+                if edit.index < 0 or edit.index >= segment_count:
+                    raise InvalidSegmentIndexError(job_id=job_id, index=edit.index, segment_count=segment_count)
+            for edit in text_edits:
+                segments[edit.index]["translated_text"] = edit.translated_text
+            segments = [seg for seg in segments if seg["translated_text"].strip()]
+            translation_data["segments"] = segments
+            with open(translation_path, "w", encoding="utf-8") as f:
+                json.dump(translation_data, f, ensure_ascii=False, indent=2)
+
+        # Apply voice edits to segment_voices.json
+        if voice_edits:
+            voices_path_str = job.artifacts.get("segment_voices_path")
+            if voices_path_str:
+                voices_path = Path(voices_path_str)
+                if voices_path.exists():
+                    voices: list = json.loads(voices_path.read_text(encoding="utf-8"))
+                    for edit in voice_edits:
+                        if 0 <= edit.index < len(voices):
+                            voices[edit.index] = edit.voice
+                    voices_path.write_text(json.dumps(voices, ensure_ascii=False), encoding="utf-8")
+
+        logger.info(
+            "Applied audio preview edits for job %s (%d text, %d voice)", job_id, len(text_edits), len(voice_edits)
         )
 
     def check_expired_jobs(self) -> list[str]:

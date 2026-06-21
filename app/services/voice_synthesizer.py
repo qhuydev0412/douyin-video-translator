@@ -58,7 +58,12 @@ class VoiceSynthesizer:
         return self._client
 
     async def synthesize(
-        self, translation: TranslationResult, output_dir: Path, voice: str | None = None
+        self,
+        translation: TranslationResult,
+        output_dir: Path,
+        voice: str | None = None,
+        speaker_gender_map: dict[str, str] | None = None,
+        per_segment_voices: list[str | None] | None = None,
     ) -> SynthesisResult:
         """Generate Vietnamese TTS audio for each segment.
 
@@ -67,8 +72,9 @@ class VoiceSynthesizer:
         Args:
             translation: The translation result containing segments to synthesize.
             output_dir: Directory to store generated audio files.
-            voice: Optional voice ID to use for all segments. If None, auto-selects
-                based on speaker labels.
+            voice: Default voice ID for all segments (lowest priority).
+            speaker_gender_map: Gender map for auto-selection when no explicit voice.
+            per_segment_voices: Per-segment voice override list (highest priority).
         """
         output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -80,6 +86,7 @@ class VoiceSynthesizer:
         # Prepare tasks for parallel execution
         import concurrent.futures
 
+        voices_used: list[str | None] = [None] * len(translation.segments)
         tasks = []
         for i, segment in enumerate(translation.segments):
             text = segment.translated_text.strip()
@@ -91,9 +98,17 @@ class VoiceSynthesizer:
 
             target_duration = segment.end - segment.start
             segment_path = output_dir / f"segment_{i:04d}.mp3"
-            # Use explicit voice if provided, otherwise auto-select by speaker
-            segment_voice = voice if voice else self.select_voice(segment.speaker)
 
+            # Priority: per_segment_voices > voice (global) > gender auto-select
+            if per_segment_voices and i < len(per_segment_voices) and per_segment_voices[i]:
+                segment_voice = per_segment_voices[i]
+            elif voice:
+                segment_voice = voice
+            else:
+                gender = speaker_gender_map.get(segment.speaker or "speaker_1") if speaker_gender_map else None
+                segment_voice = self.select_voice(segment.speaker, gender=gender)
+
+            voices_used[i] = segment_voice
             tasks.append({
                 "index": i,
                 "text": clean_text,
@@ -134,7 +149,7 @@ class VoiceSynthesizer:
         self._combine_segments(segment_audios, combined_path)
 
         logger.info("Voice synthesis completed: %d segments", len(segment_audios))
-        return SynthesisResult(audio_path=combined_path, segment_audios=segment_audios)
+        return SynthesisResult(audio_path=combined_path, segment_audios=segment_audios, segment_voices=voices_used)
 
     def _synthesize_segment_sync(self, task: dict) -> SegmentAudio:
         """Synchronous wrapper for parallel TTS execution."""
@@ -147,12 +162,12 @@ class VoiceSynthesizer:
             end=task["end"],
         )
 
-    def select_voice(self, speaker: str | None) -> str:
-        """Assign voice based on speaker label.
+    def select_voice(self, speaker: str | None, gender: str | None = None) -> str:
+        """Assign a distinct voice per speaker, using gender when known.
 
-        Uses a single consistent voice for the primary speaker.
-        Only assigns different voice if there are clearly multiple speakers.
-        Cycles through VIETNAMESE_VOICES in round-robin order.
+        Male speakers cycle through MALE_VOICES, female through FEMALE_VOICES.
+        Unknown gender falls back to VIETNAMESE_VOICES round-robin.
+        Once a speaker is mapped, the same voice is reused for consistency.
         """
         if speaker is None:
             return DEFAULT_VOICE
@@ -160,7 +175,14 @@ class VoiceSynthesizer:
         if speaker in self._speaker_voice_map:
             return self._speaker_voice_map[speaker]
 
-        voice = VIETNAMESE_VOICES[self._speaker_count % len(VIETNAMESE_VOICES)]
+        if gender == "male":
+            voice = MALE_VOICES[self._male_index % len(MALE_VOICES)]
+            self._male_index += 1
+        elif gender == "female":
+            voice = FEMALE_VOICES[self._female_index % len(FEMALE_VOICES)]
+            self._female_index += 1
+        else:
+            voice = VIETNAMESE_VOICES[self._speaker_count % len(VIETNAMESE_VOICES)]
 
         self._speaker_count += 1
         self._speaker_voice_map[speaker] = voice
@@ -176,14 +198,14 @@ class VoiceSynthesizer:
         end: float,
     ) -> SegmentAudio:
         """Synthesize a single segment with OpenAI TTS."""
-        # Estimate speed based on text length vs target duration
-        # Vietnamese ~3-4 syllables/sec at normal speed
+        # Adjust speed so TTS fits within the original segment window
+        # Vietnamese: ~0.15s per character at speed=1.0 (OpenAI TTS supports 0.25–4.0)
         speed = 1.0
-        if target_duration > 0.5 and len(text) > 20:
-            # If text is long relative to duration, speed up slightly
-            estimated_duration = len(text) * 0.15  # rough: 0.15s per char
-            if estimated_duration > target_duration:
-                speed = min(estimated_duration / target_duration, 2.0)
+        if target_duration > 0.5 and len(text) > 5:
+            estimated_duration = len(text) * 0.15
+            if estimated_duration != target_duration:
+                raw_speed = estimated_duration / target_duration
+                speed = max(min(raw_speed, 2.0), 0.5)
 
         # Generate TTS (single API call)
         response = self.client.audio.speech.create(

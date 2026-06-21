@@ -43,6 +43,20 @@ class VoiceConfirmRequest(BaseModel):
     voice_id: str = Field(min_length=1)
 
 
+class AudioPreviewEdit(BaseModel):
+    """A single audio preview segment edit — text and/or voice change."""
+
+    index: int = Field(ge=0)
+    translated_text: Optional[str] = None
+    voice: Optional[str] = None
+
+
+class AudioConfirmRequest(BaseModel):
+    """Request body for POST /api/v1/jobs/{job_id}/confirm/audio."""
+
+    edits: Optional[list[AudioPreviewEdit]] = None
+
+
 class ConfirmResponse(BaseModel):
     """Response body for confirmation endpoints."""
 

@@ -195,13 +195,13 @@ class TestGetJobStatusCheckpointPreview:
                         {
                             "start": 0.0,
                             "end": 2.5,
-                            "text": "你好",
+                            "original_text": "你好",
                             "translated_text": "Xin chào",
                         },
                         {
                             "start": 2.5,
                             "end": 5.0,
-                            "text": "世界",
+                            "original_text": "世界",
                             "translated_text": "Thế giới",
                         },
                     ]

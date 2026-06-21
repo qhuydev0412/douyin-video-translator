@@ -28,6 +28,8 @@ from app.services.voice_synthesizer import VoiceSynthesizer
 
 if TYPE_CHECKING:
     from app.services.checkpoint_manager import CheckpointManager
+    from app.services.gender_detector import GenderDetector
+    from app.services.subtitle_extractor import SubtitleExtractor
     from app.services.voice_preview import VoicePreviewGenerator
 
 logger = logging.getLogger(__name__)
@@ -56,9 +58,7 @@ STEP_ORDER: list[PipelineStep] = [
 
 # Mapping of pipeline steps that trigger a checkpoint pause after completion
 CHECKPOINT_AFTER_STEP: dict[PipelineStep, CheckpointType] = {
-    PipelineStep.RECOGNIZING_SPEECH: CheckpointType.TRANSCRIPTION,
     PipelineStep.TRANSLATING: CheckpointType.TRANSLATION,
-    PipelineStep.SYNTHESIZING_VOICE: CheckpointType.VOICE_SELECTION,
 }
 
 
@@ -133,6 +133,8 @@ class TranslationPipeline:
         job_store: JobStoreProtocol,
         checkpoint_manager: Optional[CheckpointManager] = None,
         voice_preview_generator: Optional[VoicePreviewGenerator] = None,
+        gender_detector: Optional[GenderDetector] = None,
+        subtitle_extractor: Optional[SubtitleExtractor] = None,
     ) -> None:
         self._downloader = downloader
         self._extractor = extractor
@@ -144,6 +146,8 @@ class TranslationPipeline:
         self._job_store = job_store
         self._checkpoint_manager = checkpoint_manager
         self._voice_preview_generator = voice_preview_generator
+        self._gender_detector = gender_detector
+        self._subtitle_extractor = subtitle_extractor
 
     async def execute(self, job_id: str, url: str) -> Optional[PipelineResult]:
         """Execute the full translation pipeline with progress tracking.
@@ -345,7 +349,29 @@ class TranslationPipeline:
 
         elif step == PipelineStep.RECOGNIZING_SPEECH:
             vocals_path = Path(artifacts["vocals_path"])
-            transcription: TranscriptionResult = self._recognizer.recognize(vocals_path)
+            video_path = Path(artifacts["video_path"])
+
+            # Try subtitles first (faster, more accurate than Whisper)
+            transcription: TranscriptionResult | None = None
+            if self._subtitle_extractor is not None:
+                transcription = self._subtitle_extractor.try_extract(video_path, work_dir)
+
+            if transcription is None:
+                transcription = self._recognizer.recognize(vocals_path)
+
+            # Detect speaker gender via pitch analysis (best-effort, non-blocking)
+            if self._gender_detector is not None:
+                try:
+                    speaker_genders = self._gender_detector.detect(vocals_path, transcription)
+                    gender_path = work_dir / "speaker_genders.json"
+                    gender_path.write_text(
+                        json.dumps(speaker_genders, ensure_ascii=False), encoding="utf-8"
+                    )
+                    artifacts["speaker_genders_path"] = str(gender_path)
+                    logger.info("Speaker genders for job %s: %s", job_id, speaker_genders)
+                except Exception as exc:
+                    logger.warning("Gender detection failed for job %s: %s", job_id, exc)
+
             # Serialize transcription to JSON for later steps
             transcription_path = work_dir / "transcription.json"
             self._save_transcription(transcription, transcription_path)
@@ -364,8 +390,22 @@ class TranslationPipeline:
             translation_path = Path(artifacts["translation_path"])
             translation_data = self._load_translation(translation_path)
 
-            # If no voice has been selected yet, generate previews first
-            if "selected_voice_id" not in artifacts and self._voice_preview_generator is not None:
+            # Load speaker gender map (built during RECOGNIZING_SPEECH)
+            speaker_genders: dict[str, str] = {}
+            if "speaker_genders_path" in artifacts:
+                gender_path = Path(artifacts["speaker_genders_path"])
+                if gender_path.exists():
+                    speaker_genders = json.loads(gender_path.read_text(encoding="utf-8"))
+
+            # Detect whether content has multiple distinct speakers
+            unique_speakers = {seg.speaker for seg in translation_data.segments if seg.speaker}
+            has_multiple_speakers = len(unique_speakers) > 1
+
+            # Always let user pick voice (single or multi-speaker)
+            if (
+                "selected_voice_id" not in artifacts
+                and self._voice_preview_generator is not None
+            ):
                 voice_options = await self._voice_preview_generator.generate_previews(
                     translation=translation_data,
                     work_dir=work_dir,
@@ -373,18 +413,52 @@ class TranslationPipeline:
                 )
                 previews_dir = work_dir / "voice_previews"
                 artifacts["voice_previews_dir"] = str(previews_dir)
-                # Store voice options in job state for the status API
-                self._job_store.update_job(
-                    job_id,
-                    voice_options=[opt.model_dump() for opt in voice_options],
-                )
+                self._job_store.update_job(job_id, voice_options=voice_options)
+                if self._checkpoint_manager is not None:
+                    self._checkpoint_manager.pause_at_checkpoint(
+                        job_id, CheckpointType.VOICE_SELECTION
+                    )
+                    raise CheckpointPauseSignal(
+                        job_id=job_id, checkpoint_type=CheckpointType.VOICE_SELECTION
+                    )
             else:
-                # Full synthesis with selected voice (or default if no preview generator)
                 selected_voice = artifacts.get("selected_voice_id")
+
+                # Load per-segment voices saved from a previous synthesis pass
+                per_segment_voices: list[str | None] | None = None
+                voices_path = work_dir / "segment_voices.json"
+                if voices_path.exists() and "audio_preview_confirmed" in artifacts:
+                    try:
+                        per_segment_voices = json.loads(voices_path.read_text(encoding="utf-8"))
+                    except Exception as exc:
+                        logger.warning("Could not load segment_voices.json for job %s: %s", job_id, exc)
+
                 synthesis: SynthesisResult = await self._synthesizer.synthesize(
-                    translation_data, work_dir, voice=selected_voice
+                    translation_data,
+                    work_dir,
+                    voice=selected_voice,
+                    speaker_gender_map=speaker_genders if has_multiple_speakers else None,
+                    per_segment_voices=per_segment_voices,
                 )
                 artifacts["vietnamese_audio"] = str(synthesis.audio_path)
+
+                # Always save per-segment voices for the audio preview UI
+                voices_path.write_text(
+                    json.dumps(synthesis.segment_voices, ensure_ascii=False), encoding="utf-8"
+                )
+                artifacts["segment_voices_path"] = str(voices_path)
+
+                # Pause for audio preview (once only — skip if already confirmed)
+                if (
+                    "audio_preview_confirmed" not in artifacts
+                    and self._checkpoint_manager is not None
+                ):
+                    self._checkpoint_manager.pause_at_checkpoint(
+                        job_id, CheckpointType.AUDIO_PREVIEW
+                    )
+                    raise CheckpointPauseSignal(
+                        job_id=job_id, checkpoint_type=CheckpointType.AUDIO_PREVIEW
+                    )
 
         elif step == PipelineStep.COMPOSING_VIDEO:
             video_path_comp = Path(artifacts["video_path"])

@@ -10,6 +10,8 @@ from typing import Protocol
 from fastapi import APIRouter, Depends, HTTPException
 
 from app.models.confirmation_schemas import (
+    AudioConfirmRequest,
+    AudioPreviewEdit,
     ConfirmResponse,
     TranscriptionConfirmRequest,
     TranslationConfirmRequest,
@@ -466,6 +468,77 @@ def confirm_voice(
         status=JobStatus.PROCESSING.value,
         next_step=next_step.value,
         message="Voice selection confirmed, pipeline resuming",
+    )
+
+
+@router.post(
+    "/{job_id}/confirm/audio",
+    response_model=ConfirmResponse,
+    responses={
+        404: {"description": "Job not found"},
+        409: {"description": "Job not awaiting confirmation or wrong checkpoint"},
+        410: {"description": "Job expired"},
+    },
+)
+def confirm_audio(
+    job_id: str,
+    body: AudioConfirmRequest,
+    checkpoint_manager: CheckpointManager = Depends(_get_checkpoint_manager),
+    task_enqueuer: ResumeTaskEnqueuer = Depends(_get_task_enqueuer),
+) -> ConfirmResponse:
+    """Confirm the audio preview checkpoint, applying any text edits.
+
+    Flow:
+    1. Get job (404)
+    2. Check expiry (410)
+    3. Validate checkpoint is AUDIO_PREVIEW (409)
+    4. Apply translation text edits if provided
+    5. Set audio_preview_confirmed flag in artifacts
+    6. Confirm and resume at SYNTHESIZING_VOICE (re-synthesize with edited texts)
+    """
+    try:
+        job = checkpoint_manager._job_store.get_job(job_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail={"error": "JOB_NOT_FOUND", "message": f"Khong tim thay job voi ID: {job_id}"})
+
+    if job.status == JobStatus.EXPIRED:
+        raise HTTPException(status_code=410, detail={"error": "JOB_EXPIRED", "message": f"Job '{job_id}' has expired"})
+
+    try:
+        checkpoint_manager.validate_confirmation(job_id, CheckpointType.AUDIO_PREVIEW)
+    except NotAwaitingConfirmationError as exc:
+        if exc.current_status == JobStatus.EXPIRED:
+            raise HTTPException(status_code=410, detail={"error": "JOB_EXPIRED", "message": f"Job '{job_id}' has expired"})
+        raise HTTPException(status_code=409, detail={"error": "NOT_AWAITING_CONFIRMATION", "message": f"Job is not awaiting confirmation", "current_status": exc.current_status.value})
+    except WrongCheckpointError as exc:
+        raise HTTPException(status_code=409, detail={"error": "WRONG_CHECKPOINT", "message": f"Job is at checkpoint '{exc.actual.value}', not 'audio_preview'", "current_checkpoint": exc.actual.value})
+    except ConfirmationInProgressError:
+        raise HTTPException(status_code=409, detail={"error": "CONFIRMATION_IN_PROGRESS", "message": f"Confirmation already in progress for job '{job_id}'"})
+
+    # Apply text and/or voice edits
+    if body.edits:
+        try:
+            checkpoint_manager.apply_audio_preview_edits(job_id, body.edits)
+        except Exception as exc:
+            checkpoint_manager._job_store.update_job(job_id, confirmation_lock=False)
+            raise HTTPException(status_code=422, detail={"error": "EDIT_FAILED", "message": str(exc)})
+
+    # Mark audio preview as confirmed — synthesis will not pause again
+    existing_artifacts = dict(job.artifacts)
+    existing_artifacts["audio_preview_confirmed"] = "true"
+    checkpoint_manager._job_store.update_job(job_id, artifacts=existing_artifacts)
+
+    # Resume at SYNTHESIZING_VOICE to re-synthesize with edited texts
+    checkpoint_manager.confirm_and_resume(job_id)
+    task_enqueuer.enqueue(job_id, PipelineStep.SYNTHESIZING_VOICE.value)
+
+    logger.info("Audio preview confirmed for job %s, re-synthesizing", job_id)
+
+    return ConfirmResponse(
+        job_id=job_id,
+        status=JobStatus.PROCESSING.value,
+        next_step=PipelineStep.SYNTHESIZING_VOICE.value,
+        message="Audio confirmed, re-synthesizing and composing video",
     )
 
 

@@ -2,7 +2,7 @@ version: "3.8"
 
 # Deploy:
 #   docker compose up -d
-#   Open: http://your-server:8080
+#   Open: http://your-server:8081
 #
 # With GPU:
 #   docker compose --profile gpu up -d
@@ -11,16 +11,43 @@ services:
   web:
     build: .
     ports:
-      - "8080:8080"
+      - "8081:8080"
     volumes:
       - storage:/app/storage
       - whisper_cache:/root/.cache/whisper
       - torch_cache:/root/.cache/torch/hub
       # Uncomment for Google Cloud credentials:
       # - ./credentials:/app/credentials:ro
+    env_file:
+      - .env
     environment:
       - GOOGLE_APPLICATION_CREDENTIALS=/app/credentials/gcloud.json
+      - REDIS_URL=redis://:Ph31Du9QflrZAtM5w6UkR87BnoN2p04e@31.97.71.91:30157/0
+      - CELERY_BROKER_URL=redis://:Ph31Du9QflrZAtM5w6UkR87BnoN2p04e@31.97.71.91:30157/1
+      - CELERY_RESULT_BACKEND=redis://:Ph31Du9QflrZAtM5w6UkR87BnoN2p04e@31.97.71.91:30157/1
     restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 8G
+        reservations:
+          memory: 4G
+
+  worker:
+    build: .
+    volumes:
+      - storage:/app/storage
+      - whisper_cache:/root/.cache/whisper
+      - torch_cache:/root/.cache/torch/hub
+    env_file:
+      - .env
+    environment:
+      - GOOGLE_APPLICATION_CREDENTIALS=/app/credentials/gcloud.json
+      - REDIS_URL=redis://:Ph31Du9QflrZAtM5w6UkR87BnoN2p04e@31.97.71.91:30157/0
+      - CELERY_BROKER_URL=redis://:Ph31Du9QflrZAtM5w6UkR87BnoN2p04e@31.97.71.91:30157/1
+      - CELERY_RESULT_BACKEND=redis://:Ph31Du9QflrZAtM5w6UkR87BnoN2p04e@31.97.71.91:30157/1
+    restart: unless-stopped
+    command: celery -A app.core.celery_app worker --loglevel=info --concurrency=2
     deploy:
       resources:
         limits:
@@ -32,7 +59,7 @@ services:
   web-gpu:
     build: .
     ports:
-      - "8080:8080"
+      - "8081:8080"
     volumes:
       - storage:/app/storage
       - whisper_cache:/root/.cache/whisper
@@ -40,6 +67,9 @@ services:
     environment:
       - GOOGLE_APPLICATION_CREDENTIALS=/app/credentials/gcloud.json
       - NVIDIA_VISIBLE_DEVICES=all
+      - REDIS_URL=redis://:Ph31Du9QflrZAtM5w6UkR87BnoN2p04e@31.97.71.91:30157/0
+      - CELERY_BROKER_URL=redis://:Ph31Du9QflrZAtM5w6UkR87BnoN2p04e@31.97.71.91:30157/1
+      - CELERY_RESULT_BACKEND=redis://:Ph31Du9QflrZAtM5w6UkR87BnoN2p04e@31.97.71.91:30157/1
     restart: unless-stopped
     deploy:
       resources:

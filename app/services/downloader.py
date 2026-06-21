@@ -136,6 +136,11 @@ class VideoDownloader:
             "merge_output_format": "mp4",
             "quiet": True,
             "no_warnings": True,
+            # Download subtitles (manual + auto-generated) for speech-to-text bypass
+            "writesubtitles": True,
+            "writeautomaticsub": True,
+            "subtitleslangs": ["zh", "zh-Hans", "zh-CN", "zh-TW", "zh-Hant", "chi"],
+            "subtitlesformat": "srt/vtt/ass/best",
         }
 
         info = self._download_with_retry(url, ydl_opts)

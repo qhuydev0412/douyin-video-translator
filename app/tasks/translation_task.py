@@ -34,6 +34,8 @@ def _create_pipeline(job_store: JobStoreProtocol) -> TranslationPipeline:
         Configured TranslationPipeline instance.
     """
     from app.services.checkpoint_manager import CheckpointManager
+    from app.services.gender_detector import GenderDetector
+    from app.services.subtitle_extractor import SubtitleExtractor
     from app.services.voice_preview import VoicePreviewGenerator
 
     synthesizer = VoiceSynthesizer()
@@ -51,6 +53,8 @@ def _create_pipeline(job_store: JobStoreProtocol) -> TranslationPipeline:
         job_store=job_store,
         checkpoint_manager=checkpoint_manager,
         voice_preview_generator=voice_preview_generator,
+        gender_detector=GenderDetector(),
+        subtitle_extractor=SubtitleExtractor(),
     )
 
 
@@ -106,6 +110,7 @@ def translate_video_task(self: Task, job_id: str, url: str) -> dict[str, str]:
                 "step": exc.step.value,
                 "message": exc.message,
                 "retryable": exc.retryable,
+                "retry_count": 0,
             },
         )
         raise
@@ -124,6 +129,7 @@ def translate_video_task(self: Task, job_id: str, url: str) -> dict[str, str]:
                 "step": PipelineStep.DOWNLOADING.value,
                 "message": f"Unexpected error: {exc}",
                 "retryable": False,
+                "retry_count": 0,
             },
         )
         raise

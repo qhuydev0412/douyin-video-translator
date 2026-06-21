@@ -2,17 +2,18 @@
 
 import json
 import logging
+import shutil
 import uuid
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
 from starlette.status import HTTP_202_ACCEPTED, HTTP_404_NOT_FOUND
 
 from app.api.dependencies import RateLimiter
-from app.models.job import CheckpointType, JobState, JobStatus
+from app.models.job import CheckpointType, JobState, JobStatus, PipelineStep
 from app.models.schemas import (
+    AudioPreviewSegment,
     CancelResponse,
     ErrorResponse,
     JobStatusResponse,
@@ -24,6 +25,8 @@ from app.models.schemas import (
     VoiceOptionResponse,
 )
 from app.services.downloader import VideoDownloader
+
+ALLOWED_VIDEO_EXTENSIONS = {".mp4", ".mov", ".avi", ".mkv", ".webm"}
 
 if TYPE_CHECKING:
     from app.services.checkpoint_manager import CheckpointManager
@@ -239,6 +242,8 @@ def get_job_status(
             preview_data = _load_translation_preview(job)
         elif job.checkpoint_type == CheckpointType.VOICE_SELECTION:
             preview_data = _load_voice_selection_preview(job)
+        elif job.checkpoint_type == CheckpointType.AUDIO_PREVIEW:
+            preview_data = _load_audio_preview(job)
 
     return JobStatusResponse(
         job_id=job.job_id,
@@ -296,6 +301,127 @@ def cancel_job(
     return CancelResponse(
         job_id=job_id,
         status=JobStatus.CANCELLED.value,
+    )
+
+
+@router.post(
+    "/upload",
+    response_model=TranslateResponse,
+    status_code=HTTP_202_ACCEPTED,
+    responses={
+        400: {"model": ErrorResponse, "description": "Invalid file type"},
+        429: {"model": ErrorResponse, "description": "Rate limit exceeded"},
+    },
+)
+async def upload_video(
+    request: Request,
+    file: UploadFile = File(...),
+    job_store: JobStoreProtocol = Depends(_get_job_store),
+    rate_limiter: RateLimiter = Depends(_get_rate_limiter),
+) -> TranslateResponse:
+    """Accept a local video file upload and create a translation job.
+
+    Saves the file to the job's working directory and enqueues the pipeline
+    starting from EXTRACTING_AUDIO, skipping the Douyin download step.
+    Useful for testing or when the video is already available locally.
+
+    Returns HTTP 202 with job_id on success.
+    """
+    filename = file.filename or "video"
+    suffix = Path(filename).suffix.lower()
+
+    if suffix not in ALLOWED_VIDEO_EXTENSIONS:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": "INVALID_FILE",
+                "message": (
+                    f"Định dạng file không hỗ trợ '{suffix}'. "
+                    f"Cho phép: {', '.join(sorted(ALLOWED_VIDEO_EXTENSIONS))}"
+                ),
+                "step": None,
+                "retryable": False,
+                "retry_after": None,
+            },
+        )
+
+    rate_limiter.check(request)
+
+    job_id = str(uuid.uuid4())
+    client_ip = _get_client_ip(request)
+    work_dir_str = f"storage/jobs/{job_id}"
+
+    job_store.create_job(
+        job_id=job_id,
+        url=f"local_upload://{filename}",
+        client_ip=client_ip,
+        work_dir=work_dir_str,
+    )
+
+    # Save uploaded file to the job working directory
+    work_dir = Path(work_dir_str)
+    work_dir.mkdir(parents=True, exist_ok=True)
+    video_path = work_dir / f"original{suffix}"
+
+    try:
+        with video_path.open("wb") as out:
+            shutil.copyfileobj(file.file, out)
+    finally:
+        await file.close()
+
+    # Store artifact so pipeline can find the video in EXTRACTING_AUDIO
+    job_store.update_job(job_id, artifacts={"video_path": str(video_path)})
+
+    # Enqueue pipeline starting from EXTRACTING_AUDIO (skip download step)
+    from app.tasks.resume_task import resume_pipeline_task  # noqa: PLC0415
+
+    resume_pipeline_task.delay(job_id, PipelineStep.EXTRACTING_AUDIO.value)
+
+    logger.info(
+        "Created upload job %s for file '%s' from IP %s", job_id, filename, client_ip
+    )
+
+    return TranslateResponse(
+        job_id=job_id,
+        status=JobStatus.QUEUED.value,
+        message=f"Đã nhận file '{filename}', đang xử lý",
+    )
+
+
+@router.get("/jobs/{job_id}/download")
+def download_video(
+    job_id: str,
+    job_store: JobStoreProtocol = Depends(_get_job_store),
+):
+    """Download the translated video file for a completed job."""
+    from fastapi.responses import FileResponse
+
+    try:
+        job = job_store.get_job(job_id)
+    except KeyError:
+        raise HTTPException(
+            status_code=HTTP_404_NOT_FOUND,
+            detail={"error": "JOB_NOT_FOUND", "message": f"Không tìm thấy job: {job_id}", "step": None, "retryable": False, "retry_after": None},
+        )
+
+    output_video = job.artifacts.get("output_video")
+    if not output_video:
+        raise HTTPException(
+            status_code=HTTP_404_NOT_FOUND,
+            detail={"error": "VIDEO_NOT_READY", "message": "Video chưa sẵn sàng", "step": None, "retryable": False, "retry_after": None},
+        )
+
+    output_path = Path(output_video)
+    if not output_path.exists():
+        raise HTTPException(
+            status_code=HTTP_404_NOT_FOUND,
+            detail={"error": "FILE_NOT_FOUND", "message": "File video không tồn tại", "step": None, "retryable": False, "retry_after": None},
+        )
+
+    return FileResponse(
+        path=str(output_path),
+        media_type="video/mp4",
+        filename=f"translated_{job_id}.mp4",
     )
 
 
@@ -360,13 +486,88 @@ def _load_translation_preview(job: JobState) -> PreviewData | None:
             index=i,
             start=seg["start"],
             end=seg["end"],
-            original_text=seg["text"],
+            original_text=seg["original_text"],
             translated_text=seg["translated_text"],
         )
         for i, seg in enumerate(segments)
     ]
 
     return PreviewData(translation_segments=preview_segments)
+
+
+def _load_audio_preview(job: JobState) -> PreviewData | None:
+    """Load translation segments + per-segment voices for audio preview checkpoint."""
+    translation_path_str = job.artifacts.get("translation_path")
+    if not translation_path_str:
+        return None
+
+    translation_path = Path(translation_path_str)
+    if not translation_path.exists():
+        return None
+
+    try:
+        with open(translation_path, "r", encoding="utf-8") as f:
+            translation_data = json.load(f)
+    except (json.JSONDecodeError, OSError) as exc:
+        logger.warning("Failed to load audio preview for job %s: %s", job.job_id, exc)
+        return None
+
+    # Load per-segment voices (saved after synthesis)
+    segment_voices: list[str | None] = []
+    voices_path_str = job.artifacts.get("segment_voices_path")
+    if voices_path_str:
+        voices_path = Path(voices_path_str)
+        if voices_path.exists():
+            try:
+                segment_voices = json.loads(voices_path.read_text(encoding="utf-8"))
+            except Exception:
+                pass
+
+    segments = translation_data.get("segments", [])
+    audio_segments = []
+    for i, seg in enumerate(segments):
+        voice = segment_voices[i] if i < len(segment_voices) and segment_voices[i] else "nova"
+        audio_segments.append(AudioPreviewSegment(
+            index=i,
+            start=seg["start"],
+            end=seg["end"],
+            original_text=seg["original_text"],
+            translated_text=seg["translated_text"],
+            voice=voice,
+        ))
+
+    return PreviewData(audio_preview_segments=audio_segments)
+
+
+@router.get("/jobs/{job_id}/segments/{segment_index}/audio")
+def get_segment_audio(
+    job_id: str,
+    segment_index: int,
+    job_store: JobStoreProtocol = Depends(_get_job_store),
+):
+    """Serve the synthesized MP3 audio for a single segment."""
+    from fastapi.responses import FileResponse
+
+    try:
+        job = job_store.get_job(job_id)
+    except KeyError:
+        raise HTTPException(
+            status_code=HTTP_404_NOT_FOUND,
+            detail={"error": "JOB_NOT_FOUND", "message": f"Không tìm thấy job: {job_id}", "step": None, "retryable": False, "retry_after": None},
+        )
+
+    audio_path = Path(job.work_dir) / f"segment_{segment_index:04d}.mp3"
+    if not audio_path.exists():
+        raise HTTPException(
+            status_code=HTTP_404_NOT_FOUND,
+            detail={"error": "SEGMENT_NOT_FOUND", "message": f"Audio segment {segment_index} không tồn tại", "step": None, "retryable": False, "retry_after": None},
+        )
+
+    return FileResponse(
+        path=str(audio_path),
+        media_type="audio/mpeg",
+        filename=f"segment_{segment_index:04d}.mp3",
+    )
 
 
 def _load_voice_selection_preview(job: JobState) -> PreviewData | None:

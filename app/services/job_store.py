@@ -202,8 +202,8 @@ class JobStore:
                     active_count += 1
                 else:
                     stale_ids.append(jid)
-            except KeyError:
-                # Job record no longer exists
+            except (KeyError, Exception):
+                # Job not found or has invalid/corrupt data — treat as stale
                 stale_ids.append(jid)
 
         # Clean up stale entries

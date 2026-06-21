@@ -80,3 +80,4 @@ class SynthesisResult:
 
     audio_path: Path
     segment_audios: list[SegmentAudio] = field(default_factory=list)
+    segment_voices: list[str | None] = field(default_factory=list)
