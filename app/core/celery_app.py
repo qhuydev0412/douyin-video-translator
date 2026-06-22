@@ -9,6 +9,12 @@ celery_app = Celery(
     "douyin_video_translator",
     broker=settings.CELERY_BROKER_URL,
     backend=settings.CELERY_RESULT_BACKEND,
+    include=[
+        "app.tasks.translation_task",
+        "app.tasks.cleanup_task",
+        "app.tasks.expiry_task",
+        "app.tasks.resume_task",
+    ],
 )
 
 celery_app.conf.update(
@@ -27,6 +33,8 @@ celery_app.conf.update(
     worker_max_tasks_per_child=50,
     # Result settings
     result_expires=86400,  # 24 hours
+    # Track task state
+    task_track_started=True,
 )
 
 # Celery Beat schedule for periodic tasks
@@ -40,6 +48,3 @@ celery_app.conf.beat_schedule = {
         "schedule": 30.0,  # Every 30 seconds
     },
 }
-
-# Auto-discover tasks from the app.tasks package
-celery_app.autodiscover_tasks(["app.tasks"])
