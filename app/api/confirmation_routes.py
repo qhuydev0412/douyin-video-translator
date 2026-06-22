@@ -547,7 +547,7 @@ def get_voice_preview(
     job_id: str,
     voice_id: str,
     checkpoint_manager: CheckpointManager = Depends(_get_checkpoint_manager),
-) -> "FileResponse":
+):
     """Serve a voice preview audio file for a job at the voice_selection checkpoint.
 
     Validates:

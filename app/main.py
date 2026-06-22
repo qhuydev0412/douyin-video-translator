@@ -9,6 +9,7 @@ from fastapi.responses import JSONResponse
 from app.api import confirmation_routes
 from app.api.confirmation_routes import configure_confirmation_routes
 from app.api.routes import configure_routes, router
+from app.middleware.bot_protection import BotProtectionMiddleware
 from app.services.checkpoint_manager import CheckpointManager
 from app.services.job_store import JobStore
 
@@ -28,6 +29,9 @@ def create_app() -> FastAPI:
         description="Dịch video Douyin từ tiếng Trung sang tiếng Việt",
         version="0.1.0",
     )
+
+    # Bot protection middleware (must be added before CORS so it runs first)
+    app.add_middleware(BotProtectionMiddleware, max_404_per_minute=15, block_duration_seconds=300)
 
     # CORS middleware (allow all origins for development)
     app.add_middleware(

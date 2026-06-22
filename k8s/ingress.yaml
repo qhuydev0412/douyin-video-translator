@@ -1,0 +1,69 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: douyin-translator-ingress
+  annotations:
+    # --- Bot/Scanner Protection ---
+
+    # Block common scan paths at Nginx level (before reaching app)
+    nginx.ingress.kubernetes.io/server-snippets: |
+      # Block environment file probes
+      location ~ /\.(env|git|svn|htaccess|htpasswd) {
+        return 444;
+      }
+
+      # Block source map files
+      location ~* \.(map|php|asp|aspx|jsp|cgi|sql|bak|old)$ {
+        return 444;
+      }
+
+      # Block common scanner targets
+      location ~ ^/(admin|wp-admin|wp-login|graphql|login|swagger\.json|api-docs|reference|_payload\.json|__manifest|_app/version\.json) {
+        return 444;
+      }
+
+      # Block firebase/cloudflare probes
+      location ~ ^/(__/firebase|cdn-cgi) {
+        return 444;
+      }
+
+      # Block AI service probes
+      location ~ ^/services/(openai|anthropic)\.(ts|js)$ {
+        return 444;
+      }
+
+    # Rate limiting: 10 requests/second per IP, burst 20
+    nginx.ingress.kubernetes.io/limit-rps: "10"
+    nginx.ingress.kubernetes.io/limit-burst-multiplier: "2"
+
+    # Return 429 when rate limit hit
+    nginx.ingress.kubernetes.io/limit-rate-after: "0"
+
+    # Hide server version info
+    nginx.ingress.kubernetes.io/server-snippet: |
+      server_tokens off;
+
+    # Limit request body size (video uploads need a bigger limit)
+    nginx.ingress.kubernetes.io/proxy-body-size: "500m"
+
+    # Connection limits per IP
+    nginx.ingress.kubernetes.io/limit-connections: "20"
+
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: douyin-video-translator.zeabur.app  # ← Đổi thành domain của bạn
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: douyin-translator-svc
+                port:
+                  number: 8080
+  # Uncomment for HTTPS
+  # tls:
+  #   - hosts:
+  #       - your-domain.com
+  #     secretName: douyin-translator-tls
