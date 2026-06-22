@@ -26,6 +26,7 @@ services:
       - CELERY_BROKER_URL=redis://:Ph31Du9QflrZAtM5w6UkR87BnoN2p04e@31.97.71.91:30157/1
       - CELERY_RESULT_BACKEND=redis://:Ph31Du9QflrZAtM5w6UkR87BnoN2p04e@31.97.71.91:30157/1
     restart: unless-stopped
+    command: python web_ui.py
     deploy:
       resources:
         limits:
@@ -47,7 +48,7 @@ services:
       - CELERY_BROKER_URL=redis://:Ph31Du9QflrZAtM5w6UkR87BnoN2p04e@31.97.71.91:30157/1
       - CELERY_RESULT_BACKEND=redis://:Ph31Du9QflrZAtM5w6UkR87BnoN2p04e@31.97.71.91:30157/1
     restart: unless-stopped
-    command: celery -A app.core.celery_app worker --loglevel=info --concurrency=2
+    command: celery -A app.core.celery_app worker --loglevel=info --concurrency=2 -B
     deploy:
       resources:
         limits:
@@ -71,6 +72,7 @@ services:
       - CELERY_BROKER_URL=redis://:Ph31Du9QflrZAtM5w6UkR87BnoN2p04e@31.97.71.91:30157/1
       - CELERY_RESULT_BACKEND=redis://:Ph31Du9QflrZAtM5w6UkR87BnoN2p04e@31.97.71.91:30157/1
     restart: unless-stopped
+    command: python web_ui.py
     deploy:
       resources:
         reservations:

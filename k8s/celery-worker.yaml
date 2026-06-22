@@ -1,0 +1,56 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: celery-worker
+  labels:
+    app: douyin-translator
+    component: worker
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: douyin-translator
+      component: worker
+  template:
+    metadata:
+      labels:
+        app: douyin-translator
+        component: worker
+    spec:
+      containers:
+        - name: worker
+          image: douyin-translator:latest  # ← Đổi thành image registry của bạn
+          command:
+            - celery
+            - -A
+            - app.core.celery_app:celery_app
+            - worker
+            - --loglevel=info
+            - --concurrency=2
+            - --pool=prefork
+          env:
+            - name: CELERY_BROKER_URL
+              value: "redis://redis-svc:6379/1"  # ← Đổi thành service name Redis
+            - name: CELERY_RESULT_BACKEND
+              value: "redis://redis-svc:6379/1"
+            - name: REDIS_URL
+              value: "redis://redis-svc:6379/0"
+            - name: OPENAI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: douyin-translator-secrets
+                  key: openai-api-key
+          resources:
+            requests:
+              memory: "512Mi"
+              cpu: "250m"
+            limits:
+              memory: "2Gi"
+              cpu: "2000m"
+          volumeMounts:
+            - name: storage
+              mountPath: /app/storage
+      volumes:
+        - name: storage
+          persistentVolumeClaim:
+            claimName: douyin-translator-storage  # ← Shared PVC với API pod

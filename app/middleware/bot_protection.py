@@ -26,6 +26,8 @@ BLOCKED_PATHS: set[str] = {
     "/config.yml",
     "/.git/config",
     "/.git/HEAD",
+    # Static assets that don't exist
+    "/favicon.ico",
     # JS framework fingerprinting
     "/_app/version.json",
     "/_payload.json",
