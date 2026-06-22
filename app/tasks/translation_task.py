@@ -3,23 +3,13 @@
 import asyncio
 import logging
 
-from celery import Task
-
-from app.core.celery_app import celery_app
-from app.models.job import JobStatus, PipelineStep
+from celery import shared_task
 
 logger = logging.getLogger(__name__)
 
 
 def _create_pipeline(job_store):
-    """Create a TranslationPipeline with all service dependencies.
-
-    Args:
-        job_store: Job state persistence backend.
-
-    Returns:
-        Configured TranslationPipeline instance.
-    """
+    """Create a TranslationPipeline with all service dependencies."""
     from app.services.audio_extractor import AudioExtractor
     from app.services.checkpoint_manager import CheckpointManager
     from app.services.downloader import VideoDownloader
@@ -53,26 +43,10 @@ def _create_pipeline(job_store):
     )
 
 
-@celery_app.task(
-    name="translate_video",
-    bind=True,
-    max_retries=0,
-    acks_late=True,
-)
-def translate_video_task(self: Task, job_id: str, url: str) -> dict[str, str]:
-    """Execute the full video translation pipeline as a Celery task.
-
-    Creates all service dependencies, builds the pipeline, and runs
-    the async execute() method inside asyncio.run().
-
-    Args:
-        self: Bound Celery task instance.
-        job_id: Unique job identifier.
-        url: Douyin video URL to translate.
-
-    Returns:
-        Dict with job_id and output_path on success.
-    """
+@shared_task(bind=True, name="translate_video")
+def translate_video_task(self, job_id: str, url: str) -> dict[str, str]:
+    """Execute the full video translation pipeline as a Celery task."""
+    from app.models.job import JobStatus, PipelineStep
     from app.services.job_store import JobStore
     from app.services.pipeline import CancellationError, PipelineError
 
@@ -85,7 +59,6 @@ def translate_video_task(self: Task, job_id: str, url: str) -> dict[str, str]:
         result = asyncio.run(pipeline.execute(job_id, url))
 
         if result is None:
-            # Pipeline paused at a checkpoint — task completes cleanly
             logger.info("Pipeline paused at checkpoint for job %s", job_id)
             return {"job_id": job_id, "status": "paused"}
 
@@ -95,9 +68,7 @@ def translate_video_task(self: Task, job_id: str, url: str) -> dict[str, str]:
     except PipelineError as exc:
         logger.error(
             "Pipeline error for job %s at step %s: %s",
-            job_id,
-            exc.step.value,
-            exc.message,
+            job_id, exc.step.value, exc.message,
         )
         job_store.update_job(
             job_id,
@@ -112,7 +83,6 @@ def translate_video_task(self: Task, job_id: str, url: str) -> dict[str, str]:
         raise
 
     except CancellationError as exc:
-        # Job already marked as CANCELLED in the store by the cancel endpoint.
         logger.info("Job %s was cancelled at step %s", exc.job_id, exc.step.value)
         return {"job_id": job_id, "status": "cancelled"}
 
@@ -132,18 +102,8 @@ def translate_video_task(self: Task, job_id: str, url: str) -> dict[str, str]:
 
 
 def revoke_task(task_id: str, terminate: bool = True) -> None:
-    """Revoke a running Celery task for cancellation support.
+    """Revoke a running Celery task."""
+    from app.core.celery_app import celery_app
 
-    When the API cancels a job, it should:
-    1. Update Redis job status to CANCELLED
-    2. Call this function to revoke the Celery task
-
-    The pipeline will detect the CANCELLED status at the next
-    cancellation check point between steps.
-
-    Args:
-        task_id: The Celery task ID to revoke.
-        terminate: Whether to send SIGTERM to the worker process.
-    """
     logger.info("Revoking task %s (terminate=%s)", task_id, terminate)
     celery_app.control.revoke(task_id, terminate=terminate, signal="SIGTERM")
