@@ -7,12 +7,6 @@ from celery import Task
 
 from app.core.celery_app import celery_app
 from app.models.job import JobStatus, PipelineStep
-from app.services.pipeline import (
-    CancellationError,
-    CheckpointPauseSignal,
-    PipelineError,
-    TranslationPipeline,
-)
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +36,11 @@ def resume_pipeline_task(self: Task, job_id: str, from_step: str) -> dict[str, s
     from app.services.downloader import VideoDownloader
     from app.services.gender_detector import GenderDetector
     from app.services.job_store import JobStore
+    from app.services.pipeline import (
+        CancellationError,
+        PipelineError,
+        TranslationPipeline,
+    )
     from app.services.speech_recognizer import SpeechRecognizer
     from app.services.subtitle_extractor import SubtitleExtractor
     from app.services.translator import Translator

@@ -7,24 +7,11 @@ from celery import Task
 
 from app.core.celery_app import celery_app
 from app.models.job import JobStatus, PipelineStep
-from app.services.audio_extractor import AudioExtractor
-from app.services.downloader import VideoDownloader
-from app.services.pipeline import (
-    CancellationError,
-    JobStoreProtocol,
-    PipelineError,
-    TranslationPipeline,
-)
-from app.services.speech_recognizer import SpeechRecognizer
-from app.services.translator import Translator
-from app.services.video_composer import VideoComposer
-from app.services.vocal_isolator import VocalIsolator
-from app.services.voice_synthesizer import VoiceSynthesizer
 
 logger = logging.getLogger(__name__)
 
 
-def _create_pipeline(job_store: JobStoreProtocol) -> TranslationPipeline:
+def _create_pipeline(job_store):
     """Create a TranslationPipeline with all service dependencies.
 
     Args:
@@ -33,10 +20,18 @@ def _create_pipeline(job_store: JobStoreProtocol) -> TranslationPipeline:
     Returns:
         Configured TranslationPipeline instance.
     """
+    from app.services.audio_extractor import AudioExtractor
     from app.services.checkpoint_manager import CheckpointManager
+    from app.services.downloader import VideoDownloader
     from app.services.gender_detector import GenderDetector
+    from app.services.pipeline import TranslationPipeline
+    from app.services.speech_recognizer import SpeechRecognizer
     from app.services.subtitle_extractor import SubtitleExtractor
+    from app.services.translator import Translator
+    from app.services.video_composer import VideoComposer
+    from app.services.vocal_isolator import VocalIsolator
     from app.services.voice_preview import VoicePreviewGenerator
+    from app.services.voice_synthesizer import VoiceSynthesizer
 
     synthesizer = VoiceSynthesizer()
     checkpoint_manager = CheckpointManager(job_store)
@@ -78,7 +73,8 @@ def translate_video_task(self: Task, job_id: str, url: str) -> dict[str, str]:
     Returns:
         Dict with job_id and output_path on success.
     """
-    from app.services.job_store import JobStore  # noqa: WPS433 - lazy import
+    from app.services.job_store import JobStore
+    from app.services.pipeline import CancellationError, PipelineError
 
     logger.info("Starting translation task for job %s, url=%s", job_id, url)
 

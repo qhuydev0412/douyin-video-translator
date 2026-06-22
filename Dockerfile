@@ -34,6 +34,8 @@ RUN pip install --no-cache-dir \
 
 COPY app/ ./app/
 COPY web_ui.py .
+COPY start.sh .
+RUN chmod +x start.sh
 
 RUN mkdir -p storage/jobs
 
@@ -47,4 +49,4 @@ EXPOSE 8080
 HEALTHCHECK --interval=30s --timeout=10s --retries=3 \
     CMD python -c "import urllib.request,os; urllib.request.urlopen(f'http://localhost:{os.environ.get(\"PORT\",\"8080\")}/')" || exit 1
 
-CMD ["python", "web_ui.py"]
+CMD ["./start.sh"]

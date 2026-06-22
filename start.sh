@@ -1,41 +1,18 @@
-#!/bin/bash
-set -e
-
-echo "=========================================="
-echo "  🎬 Douyin Video Translator - Starting"
-echo "=========================================="
-
-# Start Redis in background (embedded, for single-container deploy)
-echo "▶ Starting Redis..."
-redis-server --daemonize yes --port 6379 --maxmemory 128mb --maxmemory-policy allkeys-lru
-
-# Wait for Redis to be ready
-until redis-cli ping > /dev/null 2>&1; do
-  sleep 0.2
-done
-echo "✅ Redis ready"
-
-# Start Celery worker in background
-echo "▶ Starting Celery worker..."
-celery -A app.core.celery_app:celery_app worker \
-  --loglevel=info \
-  --concurrency=2 \
-  --pool=prefork \
-  --without-heartbeat \
-  --without-mingle \
-  --without-gossip &
+#!/bin/sh
+echo "=== Douyin Video Translator ==="
+echo "REDIS_URL=${REDIS_URL}"
+echo "CELERY_BROKER_URL=${CELERY_BROKER_URL}"
+echo "Starting Celery worker..."
+celery -A app.core.celery_app:celery_app worker --loglevel=info --concurrency=2 -B &
 CELERY_PID=$!
-
-# Start Celery Beat in background (for periodic tasks)
-echo "▶ Starting Celery Beat..."
-celery -A app.core.celery_app:celery_app beat \
-  --loglevel=info &
-BEAT_PID=$!
-
-# Give worker a moment to connect
 sleep 2
-echo "✅ Celery worker ready"
 
-# Start FastAPI (foreground)
-echo "▶ Starting FastAPI on port ${PORT:-8080}..."
-exec python web_ui.py
+# Check if celery is still running
+if kill -0 $CELERY_PID 2>/dev/null; then
+  echo "Celery worker started (PID=$CELERY_PID)"
+else
+  echo "ERROR: Celery worker crashed!"
+fi
+
+echo "Starting web server..."
+python web_ui.py
